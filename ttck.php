@@ -964,7 +964,9 @@ class TTCKPayment
 			if ( is_wp_error( $resp ) ) $result['msg'][] = $resp->get_error_message();
 		}
 		//end
-		WPC_PendingEmail::wp_kpoint($result['msg'], '', 'send_doctor_admin', time());
+		if (class_exists('WPC_PendingEmail') && method_exists('WPC_PendingEmail', 'wp_kpoint')) {
+			WPC_PendingEmail::wp_kpoint($result['msg'], '', 'send_doctor_admin', time());
+		}
         
 		$result['msg'] = join(". ", $result['msg']);
 
