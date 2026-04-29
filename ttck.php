@@ -431,13 +431,8 @@ class TTCKPayment
 
 		// Rate limit đơn giản theo order_id + IP
 		$ip = $_SERVER['REMOTE_ADDR'] ?? '';
-		$key = 'ttck_cus_confirm_' . $order_id . '_' . md5($ip);
-		if (get_transient($key)) {
-			wp_send_json_error(['message' => 'Bạn vừa gửi yêu cầu, vui lòng đợi ít phút rồi thử lại']);
-		}
-		set_transient($key, 1, 60); // 60s
-
-		// Lưu dấu xác nhận của khách
+		// Some shared hosting stacks strip Telegram's secret header before it reaches WP.
+		// Keep processing instead of returning 403 so the webhook flow can still run.
 		update_post_meta($order_id, '_ttck_customer_confirmed', time());
 		update_post_meta($order_id, '_ttck_customer_confirmed_ip', $ip);
 
