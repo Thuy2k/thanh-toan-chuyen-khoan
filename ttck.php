@@ -177,11 +177,11 @@ class TTCKPayment
 		$chat_id = $this->extract_telegram_chat_id($payload);
 
 		if ($secure_token === '' && $telegram_token === '' && $webhook_secret === '') {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Chua cau hinh secure token / telegram token / webhook secret.');
+			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa cấu hình TTCK. Vào plugin → Lưu lại.");
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'message' => 'Missing TTCK secure token/telegram token/webhook secret. Please save TTCK settings first.',
-			), 400);
+			), 200);
 		}
 
 		$secret_header = trim((string) $request->get_header('x-telegram-bot-api-secret-token'));
@@ -218,22 +218,23 @@ class TTCKPayment
 			}
 		}
 
-		if (!$secret_valid) {
-			// Temporary fallback: accept Telegram webhook even when hosting drops the secret header.
-			// This avoids 403 loops during deployment/testing; tighten this again after the flow is verified.
+		if (!$secret_valid && $webhook_secret !== '') {
+			// Return 200 so Telegram doesn't keep retrying (Telegram retries on 4xx/5xx)
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'message' => 'Invalid webhook secret.',
+			), 200);
 		}
 
 		if (!is_array($payload)) {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Payload Telegram khong hop le.');
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'message' => 'Invalid Telegram payload.',
-			), 400);
+			), 200);
 		}
 
 		$text = $this->extract_telegram_text($payload);
 		if ($text === '') {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Khong tim thay noi dung tin nhan.');
 			return new WP_REST_Response(array(
 				'ok' => true,
 				'accepted' => false,
@@ -243,7 +244,7 @@ class TTCKPayment
 
 		$amount = $this->extract_telegram_amount($text);
 		if ($amount <= 0) {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Khong tach duoc so tien tu tin nhan.');
+			$this->send_telegram_reply($telegram_token, $chat_id, "❓ Không đọc được số tiền từ tin nhắn.");
 			return new WP_REST_Response(array(
 				'ok' => true,
 				'accepted' => false,
@@ -253,12 +254,12 @@ class TTCKPayment
 		}
 
 		if ($secure_token === '') {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Chua co secure token. Vui long bam Luu trong cai dat TTCK.');
+			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa có secure token. Vào cài đặt TTCK → Lưu lại.");
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'accepted' => false,
 				'message' => 'Missing TTCK secure token. Please click Save on TTCK settings once.',
-			), 400);
+			), 200);
 		}
 
 		$ajax_url = add_query_arg('action', 'paid_order_ttck', admin_url('admin-ajax.php'));
@@ -282,26 +283,56 @@ class TTCKPayment
 		));
 
 		if (is_wp_error($response)) {
-			$this->send_telegram_reply($telegram_token, $chat_id, 'TTCK: Loi forward thanh toan - ' . $response->get_error_message());
+			$this->send_telegram_reply($telegram_token, $chat_id, "❌ Lỗi kết nối nội bộ: " . $response->get_error_message());
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'accepted' => true,
 				'message' => $response->get_error_message(),
-			), 500);
+			), 200);
 		}
 
 		$http_code = intval(wp_remote_retrieve_response_code($response));
 		$body_raw = (string) wp_remote_retrieve_body($response);
+		// Strip UTF-8 BOM if present (some PHP configs output BOM before JSON)
+		$body_raw = ltrim($body_raw, "\xEF\xBB\xBF");
 		$decoded = json_decode($body_raw, true);
-		$reply_message = 'TTCK: Da nhan tin. ';
+
+		// Build clean Vietnamese reply message
+		$amount_fmt = number_format($amount, 0, '.', '.') . 'đ';
+		$prefix = isset($settings['bank_transfer']['transaction_prefix']) ? $settings['bank_transfer']['transaction_prefix'] : '';
+		$case_insensitive = isset($settings['bank_transfer']['case_insensitive']) ? $settings['bank_transfer']['case_insensitive'] : false;
+		$order_id_parsed = function_exists('ttck_parse_order_id') ? ttck_parse_order_id($text, $prefix, $case_insensitive) : null;
+		$order_label = $order_id_parsed ? '#' . $order_id_parsed : '';
+
 		if (is_array($decoded)) {
+			$msg_text = '';
+			if (isset($decoded['msg'])) {
+				$msg_text = is_array($decoded['msg']) ? implode(' ', $decoded['msg']) : (string) $decoded['msg'];
+				$msg_text = trim($msg_text);
+			}
 			if (!empty($decoded['error'])) {
-				$reply_message .= 'Chua doi trang thai don. ' . (isset($decoded['msg']) ? $decoded['msg'] : 'Co loi xay ra.');
+				// error is non-zero (failure)
+				if (is_string($decoded['error']) && stripos($decoded['error'], 'not found') !== false) {
+					$reply_message = "❌ Không tìm thấy đơn hàng" . ($order_label ? " $order_label" : '') . ".";
+				} elseif (stripos($msg_text, 'underpaid') !== false || stripos($msg_text, 'thieu tien') !== false) {
+					$reply_message = "⚠️ Đơn $order_label thiếu tiền: nhận {$amount_fmt} / cần thanh toán đủ.";
+				} elseif (stripos($msg_text, 'cancelled') !== false) {
+					$reply_message = "❌ Đơn $order_label đã bị huỷ, không xử lý.";
+				} else {
+					$reply_message = "⚠️ Chưa đổi trạng thái đơn $order_label. " . ($msg_text ?: 'Có lỗi xảy ra.');
+				}
 			} else {
-				$reply_message .= isset($decoded['msg']) ? $decoded['msg'] : 'Da gui xu ly thanh cong.';
+				// error == 0 (success)
+				if (stripos($msg_text, 'processed before') !== false) {
+					$reply_message = "ℹ️ Đơn $order_label đã được xử lý trước đó.";
+				} elseif (stripos($msg_text, 'overpaid') !== false) {
+					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} (dư tiền).";
+				} else {
+					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} thành công.";
+				}
 			}
 		} else {
-			$reply_message .= 'HTTP ' . $http_code . '. ' . $body_raw;
+			$reply_message = "⚠️ Phản hồi không xác định (HTTP $http_code).";
 		}
 		$this->send_telegram_reply($telegram_token, $chat_id, $reply_message);
 
