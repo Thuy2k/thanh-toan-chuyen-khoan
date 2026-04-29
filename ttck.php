@@ -88,6 +88,7 @@ class TTCKPayment
 	public function init()
 	{
 		if (class_exists('WooCommerce')) {
+			add_action('rest_api_init', array($this, 'register_rest_routes'));
 			// Run this plugin normally if WooCommerce is active
 			// Load the localization featureUnderpaid
 
@@ -148,6 +149,176 @@ class TTCKPayment
 			// Throw a notice if WooCommerce is NOT active
 			add_action('admin_notices', array($this, 'notice_if_not_woocommerce'));
 		}
+	}
+
+	public function register_rest_routes()
+	{
+		register_rest_route('ttck/v1', '/telegram-webhook', array(
+			'methods' => 'POST',
+			'callback' => array($this, 'telegram_webhook_handler'),
+			'permission_callback' => '__return_true',
+		));
+	}
+
+	public function telegram_webhook_handler($request)
+	{
+		$settings = self::get_settings();
+		$secure_token = isset($settings['bank_transfer']['secure_token'])
+			? trim((string) $settings['bank_transfer']['secure_token'])
+			: '';
+		$telegram_token = isset($settings['telegram_token'])
+			? trim((string) $settings['telegram_token'])
+			: '';
+
+		if ($secure_token === '' && $telegram_token === '') {
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'message' => 'Missing TTCK secure token/telegram token. Please save TTCK settings first.',
+			), 400);
+		}
+
+		$secret_header = trim((string) $request->get_header('x-telegram-bot-api-secret-token'));
+		$secret_query = trim((string) $request->get_param('token'));
+		$provided_secret = $secret_header !== '' ? $secret_header : $secret_query;
+
+		$secret_valid = false;
+		if ($provided_secret !== '') {
+			if ($secure_token !== '' && hash_equals($secure_token, $provided_secret)) {
+				$secret_valid = true;
+			}
+			if (!$secret_valid && $telegram_token !== '' && hash_equals($telegram_token, $provided_secret)) {
+				$secret_valid = true;
+			}
+		}
+
+		if (!$secret_valid) {
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'message' => 'Invalid Telegram webhook secret.',
+			), 403);
+		}
+
+		$payload = $request->get_json_params();
+		if (!is_array($payload)) {
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'message' => 'Invalid Telegram payload.',
+			), 400);
+		}
+
+		$text = $this->extract_telegram_text($payload);
+		if ($text === '') {
+			return new WP_REST_Response(array(
+				'ok' => true,
+				'accepted' => false,
+				'message' => 'No message text/caption found.',
+			), 200);
+		}
+
+		$amount = $this->extract_telegram_amount($text);
+		if ($amount <= 0) {
+			return new WP_REST_Response(array(
+				'ok' => true,
+				'accepted' => false,
+				'message' => 'Cannot parse transfer amount from Telegram message.',
+				'text' => $text,
+			), 200);
+		}
+
+		if ($secure_token === '') {
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'accepted' => false,
+				'message' => 'Missing TTCK secure token. Please click Save on TTCK settings once.',
+			), 400);
+		}
+
+		$ajax_url = add_query_arg('action', 'paid_order_ttck', admin_url('admin-ajax.php'));
+		$ttck_body = array(
+			'data' => array(
+				array(
+					'amount' => $amount,
+					'description' => $text,
+					'subAccId' => 'telegram',
+				),
+			),
+		);
+
+		$response = wp_remote_post($ajax_url, array(
+			'timeout' => 20,
+			'headers' => array(
+				'Content-Type' => 'application/json',
+				'Secure-Token' => $secure_token,
+			),
+			'body' => wp_json_encode($ttck_body),
+		));
+
+		if (is_wp_error($response)) {
+			return new WP_REST_Response(array(
+				'ok' => false,
+				'accepted' => true,
+				'message' => $response->get_error_message(),
+			), 500);
+		}
+
+		$http_code = intval(wp_remote_retrieve_response_code($response));
+		$body_raw = (string) wp_remote_retrieve_body($response);
+		$decoded = json_decode($body_raw, true);
+
+		return new WP_REST_Response(array(
+			'ok' => true,
+			'accepted' => true,
+			'forward_status' => $http_code,
+			'forward_result' => is_array($decoded) ? $decoded : $body_raw,
+		), 200);
+	}
+
+	private function extract_telegram_text($payload)
+	{
+		if (!is_array($payload)) {
+			return '';
+		}
+
+		$candidates = array(
+			isset($payload['message']['text']) ? $payload['message']['text'] : '',
+			isset($payload['message']['caption']) ? $payload['message']['caption'] : '',
+			isset($payload['channel_post']['text']) ? $payload['channel_post']['text'] : '',
+			isset($payload['channel_post']['caption']) ? $payload['channel_post']['caption'] : '',
+			isset($payload['edited_message']['text']) ? $payload['edited_message']['text'] : '',
+			isset($payload['edited_message']['caption']) ? $payload['edited_message']['caption'] : '',
+		);
+
+		foreach ($candidates as $candidate) {
+			if (is_string($candidate) && trim($candidate) !== '') {
+				return sanitize_textarea_field($candidate);
+			}
+		}
+
+		return '';
+	}
+
+	private function extract_telegram_amount($text)
+	{
+		$text = (string) $text;
+		if ($text === '') {
+			return 0;
+		}
+
+		preg_match_all('/(?<!\\d)(\\d{1,3}(?:[\\.,\\s]\\d{3})+|\\d{4,12})(?!\\d)/u', $text, $matches);
+		if (empty($matches[1]) || !is_array($matches[1])) {
+			return 0;
+		}
+
+		$max_amount = 0;
+		foreach ($matches[1] as $raw) {
+			$normalized = preg_replace('/[^0-9]/', '', (string) $raw);
+			$amount = intval($normalized);
+			if ($amount > $max_amount) {
+				$max_amount = $amount;
+			}
+		}
+
+		return $max_amount;
 	}
 	public function ttck_customer_confirm_transfer() {
 		if (empty($_POST['order_id'])) {
