@@ -270,6 +270,13 @@ class TTCK_Admin_Page
 							</td>
 						</tr>
 						<tr>
+							<th scope="row"><?php echo __('Telegram Webhook Secret', 'thanh-toan-chuyen-khoan') ?></th>
+							<td>
+								<input type="text" name="settings[telegram_webhook_secret]" id="telegram_webhook_secret" value="<?php echo isset($settings['telegram_webhook_secret'])? $settings['telegram_webhook_secret']:'' ?>"/>
+								<p class="description">Dùng chuỗi này khi setWebhook với tham số token=... (không dùng dấu :).</p>
+							</td>
+						</tr>
+						<tr>
 							<th scope="row"><?php echo __('Telegram Group ID', 'thanh-toan-chuyen-khoan') ?></th>
 							<td>
 								<input type="text" name="settings[telegram_chatid]" id="telegram_chatid" value="<?php echo isset($settings['telegram_chatid'])? $settings['telegram_chatid']:'' ?>"/>

@@ -58,6 +58,7 @@ class TTCKPayment
 			'order_status_after_paid'   => 'wc-completed',
 			'order_status_after_underpaid' => 'wc-processing',
 		),
+		'telegram_webhook_secret' => '',
 
 	);
 	
@@ -169,11 +170,14 @@ class TTCKPayment
 		$telegram_token = isset($settings['telegram_token'])
 			? trim((string) $settings['telegram_token'])
 			: '';
+		$webhook_secret = isset($settings['telegram_webhook_secret'])
+			? trim((string) $settings['telegram_webhook_secret'])
+			: '';
 
-		if ($secure_token === '' && $telegram_token === '') {
+		if ($secure_token === '' && $telegram_token === '' && $webhook_secret === '') {
 			return new WP_REST_Response(array(
 				'ok' => false,
-				'message' => 'Missing TTCK secure token/telegram token. Please save TTCK settings first.',
+				'message' => 'Missing TTCK secure token/telegram token/webhook secret. Please save TTCK settings first.',
 			), 400);
 		}
 
@@ -183,6 +187,9 @@ class TTCKPayment
 
 		$secret_valid = false;
 		if ($provided_secret !== '') {
+			if ($webhook_secret !== '' && hash_equals($webhook_secret, $provided_secret)) {
+				$secret_valid = true;
+			}
 			if ($secure_token !== '' && hash_equals($secure_token, $provided_secret)) {
 				$secret_valid = true;
 			}
