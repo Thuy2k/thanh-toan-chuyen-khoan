@@ -59,6 +59,7 @@ class TTCKPayment
 			'order_status_after_underpaid' => 'wc-processing',
 		),
 		'telegram_webhook_secret' => '',
+		'tgs_hmac_secret' => '',
 
 	);
 	
@@ -214,6 +215,38 @@ class TTCKPayment
 				'ok' => false,
 				'message' => 'Invalid webhook secret.',
 			), 200);
+		}
+
+		// HMAC signature verification (optional – only enforced when tgs_hmac_secret is configured)
+		$hmac_secret = isset($settings['tgs_hmac_secret']) ? trim((string) $settings['tgs_hmac_secret']) : '';
+		if ($hmac_secret !== '') {
+			$ts    = trim((string) ($request->get_header('x-tgs-timestamp') ?: ''));
+			$nonce = trim((string) ($request->get_header('x-tgs-nonce') ?: ''));
+			$sig   = trim((string) ($request->get_header('x-tgs-signature') ?: ''));
+
+			if ($ts === '' || $nonce === '' || $sig === '') {
+				return new WP_REST_Response(array('ok' => false, 'message' => 'Missing HMAC headers.'), 200);
+			}
+
+			// Reject requests older/newer than 120 seconds
+			if (abs(time() - intval($ts)) > 120) {
+				return new WP_REST_Response(array('ok' => false, 'message' => 'Request timestamp expired.'), 200);
+			}
+
+			// Replay protection: store nonce in transient for 5 minutes
+			$nonce_key = 'tgs_nonce_' . preg_replace('/[^a-zA-Z0-9\-]/', '', substr($nonce, 0, 64));
+			if (get_transient($nonce_key)) {
+				return new WP_REST_Response(array('ok' => false, 'message' => 'Nonce already used.'), 200);
+			}
+			set_transient($nonce_key, 1, 300);
+
+			// Rebuild canonical string and verify
+			$body_hash = hash('sha256', $request->get_body());
+			$canonical = $ts . "\n" . $nonce . "\n" . $body_hash;
+			$expected  = hash_hmac('sha256', $canonical, $hmac_secret);
+			if (!hash_equals($expected, $sig)) {
+				return new WP_REST_Response(array('ok' => false, 'message' => 'Invalid HMAC signature.'), 200);
+			}
 		}
 
 		if (!is_array($payload)) {

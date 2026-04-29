@@ -277,6 +277,13 @@ class TTCK_Admin_Page
 							</td>
 						</tr>
 						<tr>
+							<th scope="row"><?php echo __('TGS HMAC Secret (App Signing)', 'thanh-toan-chuyen-khoan') ?></th>
+							<td>
+								<input type="text" name="settings[tgs_hmac_secret]" id="tgs_hmac_secret" value="<?php echo esc_attr(isset($settings['tgs_hmac_secret']) ? $settings['tgs_hmac_secret'] : '') ?>" placeholder="Để trống nếu không dùng app TGS Bank Forwarder"/>
+								<p class="description">Khóa bí mật để xác thực chữ ký HMAC-SHA256 từ app Android. Nhập cùng giá trị này vào cấu hình mapping trong app (PREFIX|URL|HMAC_SECRET). Để trống = bỏ qua kiểm tra chữ ký.</p>
+							</td>
+						</tr>
+						<tr>
 							<th scope="row"><?php echo __('Telegram Group ID', 'thanh-toan-chuyen-khoan') ?></th>
 							<td>
 								<input type="text" name="settings[telegram_chatid]" id="telegram_chatid" value="<?php echo isset($settings['telegram_chatid'])? $settings['telegram_chatid']:'' ?>"/>
