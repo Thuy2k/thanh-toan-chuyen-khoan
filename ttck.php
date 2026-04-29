@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 
 /**
  * Plugin Name: BizGPT - Thanh ToÃ¡n QuÃ©t MÃ£ QR Code Tá»± Äá»™ng cho WooCommerce
@@ -1031,25 +1031,26 @@ class TTCKPayment
 		die();
 		//TODO: NghiÃªn cá»©u viá»‡c gá»­i mail thÃ´ng bÃ¡o Ä‘Æ¡n hÃ ng thanh toÃ¡n hoÃ n táº¥t.
 	}
-	
-	
-public function restore_masked_secrets() {
-if (!is_admin() || empty($_POST['settings'])) return;
 
-$settings = isset($_POST['settings']) ? wp_unslash($_POST['settings']) : array();
-$stored = self::get_settings();
+	public function restore_masked_secrets() {
+		if (!is_admin() || empty($_POST['settings'])) {
+			return;
+		}
 
-// Restore webhook_secret if not changed
-if (isset($settings['telegram_webhook_secret']) && $settings['telegram_webhook_secret'] === '***UNCHANGED***') {
-$_POST['settings']['telegram_webhook_secret'] = $stored['telegram_webhook_secret'] ?? '';
-}
+		$settings = isset($_POST['settings']) ? wp_unslash($_POST['settings']) : array();
+		$stored = self::get_settings();
 
-// Restore tgs_hmac_secret if not changed
-if (isset($settings['tgs_hmac_secret']) && $settings['tgs_hmac_secret'] === '***UNCHANGED***') {
-$_POST['settings']['tgs_hmac_secret'] = $stored['tgs_hmac_secret'] ?? '';
-}
-}
-function load_plugin_textdomain()
+		// Keep existing secret when admin chose not to change it.
+		if (isset($settings['telegram_webhook_secret']) && $settings['telegram_webhook_secret'] === '***UNCHANGED***') {
+			$_POST['settings']['telegram_webhook_secret'] = isset($stored['telegram_webhook_secret']) ? $stored['telegram_webhook_secret'] : '';
+		}
+
+		if (isset($settings['tgs_hmac_secret']) && $settings['tgs_hmac_secret'] === '***UNCHANGED***') {
+			$_POST['settings']['tgs_hmac_secret'] = isset($stored['tgs_hmac_secret']) ? $stored['tgs_hmac_secret'] : '';
+		}
+	}
+
+	function load_plugin_textdomain()
 	{
 		load_plugin_textdomain($this->domain, false, dirname(plugin_basename(__FILE__))  . '/languages');
 	}
