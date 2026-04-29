@@ -272,15 +272,35 @@ class TTCK_Admin_Page
 						<tr>
 							<th scope="row"><?php echo __('Telegram Webhook Secret', 'thanh-toan-chuyen-khoan') ?></th>
 							<td>
-								<input type="text" name="settings[telegram_webhook_secret]" id="telegram_webhook_secret" value="<?php echo isset($settings['telegram_webhook_secret'])? $settings['telegram_webhook_secret']:'' ?>"/>
+								<?php
+									$webhook_secret = isset($settings['telegram_webhook_secret']) ? $settings['telegram_webhook_secret'] : '';
+									$webhook_secret_hidden = !empty($webhook_secret);
+								?>
+								<?php if ($webhook_secret_hidden): ?>
+									<p style="margin: 5px 0; font-weight: bold;">● Đã cấu hình: <span style="font-family: monospace;">***</span></p>
+									<label><input type="checkbox" id="webhook_secret_change" name="settings[webhook_secret_change]" value="1" onclick="document.getElementById('webhook_secret_input').style.display = this.checked ? 'block' : 'none';" /> Thay đổi giá trị này</label>
+									<input type="text" id="webhook_secret_input" name="settings[telegram_webhook_secret]" placeholder="Nhập giá trị mới..." style="display: none; width: 100%; margin-top: 5px;"/>
+								<?php else: ?>
+									<input type="text" name="settings[telegram_webhook_secret]" value=""/>
+								<?php endif; ?>
 								<p class="description">Dùng chuỗi này khi setWebhook với tham số token=... (không dùng dấu :).</p>
 							</td>
 						</tr>
 						<tr>
 							<th scope="row"><?php echo __('TGS HMAC Secret (App Signing)', 'thanh-toan-chuyen-khoan') ?></th>
 							<td>
-								<input type="text" name="settings[tgs_hmac_secret]" id="tgs_hmac_secret" value="<?php echo esc_attr(isset($settings['tgs_hmac_secret']) ? $settings['tgs_hmac_secret'] : '') ?>" placeholder="Để trống nếu không dùng app TGS Bank Forwarder"/>
-								<p class="description">Khóa bí mật để xác thực chữ ký HMAC-SHA256 từ app Android. Nhập cùng giá trị này vào cấu hình mapping trong app (PREFIX|URL|HMAC_SECRET). Để trống = bỏ qua kiểm tra chữ ký.</p>
+								<?php
+									$tgs_hmac_secret = isset($settings['tgs_hmac_secret']) ? $settings['tgs_hmac_secret'] : '';
+									$tgs_hmac_secret_hidden = !empty($tgs_hmac_secret);
+								?>
+								<?php if ($tgs_hmac_secret_hidden): ?>
+									<p style="margin: 5px 0; font-weight: bold;">● Đã cấu hình: <span style="font-family: monospace;">***</span></p>
+									<label><input type="checkbox" id="tgs_hmac_secret_change" name="settings[tgs_hmac_secret_change]" value="1" onclick="document.getElementById('tgs_hmac_secret_input').style.display = this.checked ? 'block' : 'none';" /> Thay đổi giá trị này</label>
+									<input type="text" id="tgs_hmac_secret_input" name="settings[tgs_hmac_secret]" placeholder="Nhập giá trị mới..." style="display: none; width: 100%; margin-top: 5px;"/>
+								<?php else: ?>
+									<input type="text" name="settings[tgs_hmac_secret]" value="" placeholder="Để trống nếu không dùng app TGS Bank Forwarder"/>
+								<?php endif; ?>
+								<p class="description">Khóa bí mật để xác thực chữ ký HMAC-SHA256 từ app Android. Nhập cùng giá trị này vào cấu hình mapping trong app. Để trống = bỏ qua kiểm tra chữ ký.</p>
 							</td>
 						</tr>
 						<tr>
@@ -303,6 +323,29 @@ class TTCK_Admin_Page
 				</p>
 
 			</form>
+			<script>
+			(function() {
+				// Handle masked secret fields on form submission
+				const form = document.querySelector('form[action]');
+				if (form) {
+					form.addEventListener('submit', function(e) {
+						// Webhook secret: restore old value if not changed
+						const webhookChangeCheckbox = document.getElementById('webhook_secret_change');
+						const webhookInput = document.getElementById('webhook_secret_input');
+						if (webhookChangeCheckbox && !webhookChangeCheckbox.checked && webhookInput) {
+							webhookInput.value = '***UNCHANGED***';
+						}
+						
+						// HMAC secret: restore old value if not changed
+						const hmacChangeCheckbox = document.getElementById('tgs_hmac_secret_change');
+						const hmacInput = document.getElementById('tgs_hmac_secret_input');
+						if (hmacChangeCheckbox && !hmacChangeCheckbox.checked && hmacInput) {
+							hmacInput.value = '***UNCHANGED***';
+						}
+					});
+				}
+			})();
+			</script>
 			<div id="ttck-admin-footer" style="border: 1px dotted; padding: 5px;display: none">
 				<?php
 				

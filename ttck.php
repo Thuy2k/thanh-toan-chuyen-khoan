@@ -1,9 +1,9 @@
-<?php
+﻿<?php
 
 /**
- * Plugin Name: BizGPT - Thanh Toán Quét Mã QR Code Tự Động cho WooCommerce
+ * Plugin Name: BizGPT - Thanh ToÃ¡n QuÃ©t MÃ£ QR Code Tá»± Äá»™ng cho WooCommerce
  * Plugin URI: https://bizgpt.vn
- * Description: Tự động xác nhận thanh toán quét mã QR Code MoMo, ViettelPay, VNPay, Vietcombank, Vietinbank, Techcombank, MB, ACB, VPBank, TPBank..
+ * Description: Tá»± Ä‘á»™ng xÃ¡c nháº­n thanh toÃ¡n quÃ©t mÃ£ QR Code MoMo, ViettelPay, VNPay, Vietcombank, Vietinbank, Techcombank, MB, ACB, VPBank, TPBank..
  * Author: BizGPT Team
  * Author URI: https://bizgpt.vn
  * Text Domain: thanh-toan-chuyen-khoan
@@ -33,7 +33,7 @@ class TTCKPayment
 		array(
 			'case_insensitive' => 'yes',
 			'enabled' => 'yes',
-			'title' => 'Chuyển khoản ngân hàng 24/7',
+			'title' => 'Chuyá»ƒn khoáº£n ngÃ¢n hÃ ng 24/7',
 			'secure_token' => '',
 			'transaction_prefix' => 'ABC',
 			'acceptable_difference' => 1000,
@@ -89,6 +89,9 @@ class TTCKPayment
 	
 	public function init()
 	{
+		// Handle masked secret fields restore
+		add_action('admin_init', array($this, 'restore_masked_secrets'));
+
 		if (class_exists('WooCommerce')) {
 			add_action('rest_api_init', array($this, 'register_rest_routes'));
 			// Run this plugin normally if WooCommerce is active
@@ -108,7 +111,7 @@ class TTCKPayment
 				#$links    = array_reverse(array_merge($links, $settings));
 				return $links;
 			});*/
-			// Đăng kí thêm trạng thái 
+			// ÄÄƒng kÃ­ thÃªm tráº¡ng thÃ¡i 
 			add_filter('wc_order_statuses', array($this, 'add_order_statuses'));
 			register_post_status('wc-paid', array(
 				'label'                     => __('Paid', 'thanh-toan-chuyen-khoan'),
@@ -178,7 +181,7 @@ class TTCKPayment
 		$chat_id = $this->extract_telegram_chat_id($payload);
 
 		if ($secure_token === '' && $webhook_secret === '') {
-			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa cấu hình TTCK. Vào plugin → Lưu lại.");
+			$this->send_telegram_reply($telegram_token, $chat_id, "âš ï¸ ChÆ°a cáº¥u hÃ¬nh TTCK. VÃ o plugin â†’ LÆ°u láº¡i.");
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'message' => 'Missing TTCK secure token/webhook secret. Please save TTCK settings first.',
@@ -217,7 +220,7 @@ class TTCKPayment
 			), 200);
 		}
 
-		// HMAC signature verification (optional – only enforced when tgs_hmac_secret is configured)
+		// HMAC signature verification (optional â€“ only enforced when tgs_hmac_secret is configured)
 		$hmac_secret = isset($settings['tgs_hmac_secret']) ? trim((string) $settings['tgs_hmac_secret']) : '';
 		if ($hmac_secret !== '') {
 			$ts    = trim((string) ($request->get_header('x-tgs-timestamp') ?: ''));
@@ -267,7 +270,7 @@ class TTCKPayment
 
 		$amount = $this->extract_telegram_amount($text);
 		if ($amount <= 0) {
-			$this->send_telegram_reply($telegram_token, $chat_id, "❓ Không đọc được số tiền từ tin nhắn.");
+			$this->send_telegram_reply($telegram_token, $chat_id, "â“ KhÃ´ng Ä‘á»c Ä‘Æ°á»£c sá»‘ tiá»n tá»« tin nháº¯n.");
 			return new WP_REST_Response(array(
 				'ok' => true,
 				'accepted' => false,
@@ -277,7 +280,7 @@ class TTCKPayment
 		}
 
 		if ($secure_token === '') {
-			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa có secure token. Vào cài đặt TTCK → Lưu lại.");
+			$this->send_telegram_reply($telegram_token, $chat_id, "âš ï¸ ChÆ°a cÃ³ secure token. VÃ o cÃ i Ä‘áº·t TTCK â†’ LÆ°u láº¡i.");
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'accepted' => false,
@@ -306,7 +309,7 @@ class TTCKPayment
 		));
 
 		if (is_wp_error($response)) {
-			$this->send_telegram_reply($telegram_token, $chat_id, "❌ Lỗi kết nối nội bộ: " . $response->get_error_message());
+			$this->send_telegram_reply($telegram_token, $chat_id, "âŒ Lá»—i káº¿t ná»‘i ná»™i bá»™: " . $response->get_error_message());
 			return new WP_REST_Response(array(
 				'ok' => false,
 				'accepted' => true,
@@ -321,7 +324,7 @@ class TTCKPayment
 		$decoded = json_decode($body_raw, true);
 
 		// Build clean Vietnamese reply message
-		$amount_fmt = number_format($amount, 0, '.', '.') . 'đ';
+		$amount_fmt = number_format($amount, 0, '.', '.') . 'Ä‘';
 		$prefix = isset($settings['bank_transfer']['transaction_prefix']) ? $settings['bank_transfer']['transaction_prefix'] : '';
 		$case_insensitive = isset($settings['bank_transfer']['case_insensitive']) ? $settings['bank_transfer']['case_insensitive'] : false;
 		$order_id_parsed = function_exists('ttck_parse_order_id') ? ttck_parse_order_id($text, $prefix, $case_insensitive) : null;
@@ -336,26 +339,26 @@ class TTCKPayment
 			if (!empty($decoded['error'])) {
 				// error is non-zero (failure)
 				if (is_string($decoded['error']) && stripos($decoded['error'], 'not found') !== false) {
-					$reply_message = "❌ Không tìm thấy đơn hàng" . ($order_label ? " $order_label" : '') . ".";
+					$reply_message = "âŒ KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng" . ($order_label ? " $order_label" : '') . ".";
 				} elseif (stripos($msg_text, 'underpaid') !== false || stripos($msg_text, 'thieu tien') !== false) {
-					$reply_message = "⚠️ Đơn $order_label thiếu tiền: nhận {$amount_fmt} / cần thanh toán đủ.";
+					$reply_message = "âš ï¸ ÄÆ¡n $order_label thiáº¿u tiá»n: nháº­n {$amount_fmt} / cáº§n thanh toÃ¡n Ä‘á»§.";
 				} elseif (stripos($msg_text, 'cancelled') !== false) {
-					$reply_message = "❌ Đơn $order_label đã bị huỷ, không xử lý.";
+					$reply_message = "âŒ ÄÆ¡n $order_label Ä‘Ã£ bá»‹ huá»·, khÃ´ng xá»­ lÃ½.";
 				} else {
-					$reply_message = "⚠️ Chưa đổi trạng thái đơn $order_label. " . ($msg_text ?: 'Có lỗi xảy ra.');
+					$reply_message = "âš ï¸ ChÆ°a Ä‘á»•i tráº¡ng thÃ¡i Ä‘Æ¡n $order_label. " . ($msg_text ?: 'CÃ³ lá»—i xáº£y ra.');
 				}
 			} else {
 				// error == 0 (success)
 				if (stripos($msg_text, 'processed before') !== false) {
-					$reply_message = "ℹ️ Đơn $order_label đã được xử lý trước đó.";
+					$reply_message = "â„¹ï¸ ÄÆ¡n $order_label Ä‘Ã£ Ä‘Æ°á»£c xá»­ lÃ½ trÆ°á»›c Ä‘Ã³.";
 				} elseif (stripos($msg_text, 'overpaid') !== false) {
-					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} (dư tiền).";
+					$reply_message = "âœ… XÃ¡c nháº­n thanh toÃ¡n Ä‘Æ¡n $order_label - {$amount_fmt} (dÆ° tiá»n).";
 				} else {
-					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} thành công.";
+					$reply_message = "âœ… XÃ¡c nháº­n thanh toÃ¡n Ä‘Æ¡n $order_label - {$amount_fmt} thÃ nh cÃ´ng.";
 				}
 			}
 		} else {
-			$reply_message = "⚠️ Phản hồi không xác định (HTTP $http_code).";
+			$reply_message = "âš ï¸ Pháº£n há»“i khÃ´ng xÃ¡c Ä‘á»‹nh (HTTP $http_code).";
 		}
 		$this->send_telegram_reply($telegram_token, $chat_id, $reply_message);
 
@@ -453,55 +456,55 @@ class TTCKPayment
 	}
 	public function ttck_customer_confirm_transfer() {
 		if (empty($_POST['order_id'])) {
-			wp_send_json_error(['message' => 'Thiếu order_id']);
+			wp_send_json_error(['message' => 'Thiáº¿u order_id']);
 		}
 
 		$order_id = absint($_POST['order_id']);
 		$order = wc_get_order($order_id);
 		if (!$order) {
-			wp_send_json_error(['message' => 'Không tìm thấy đơn hàng']);
+			wp_send_json_error(['message' => 'KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng']);
 		}
 
-		// Chỉ cho đúng người mua xác nhận (hoặc user đang login là chủ đơn)
+		// Chá»‰ cho Ä‘Ãºng ngÆ°á»i mua xÃ¡c nháº­n (hoáº·c user Ä‘ang login lÃ  chá»§ Ä‘Æ¡n)
 		$user_id = get_current_user_id();
 		if ($user_id && (int)$order->get_user_id() !== $user_id) {
-			wp_send_json_error(['message' => 'Bạn không có quyền xác nhận đơn này']);
+			wp_send_json_error(['message' => 'Báº¡n khÃ´ng cÃ³ quyá»n xÃ¡c nháº­n Ä‘Æ¡n nÃ y']);
 		}
 
-		// Nếu guest checkout: cho phép xác nhận khi đang ở trang thankyou của order
-		// (nếu muốn chặt hơn, anh có thể truyền order_key và check)
+		// Náº¿u guest checkout: cho phÃ©p xÃ¡c nháº­n khi Ä‘ang á»Ÿ trang thankyou cá»§a order
+		// (náº¿u muá»‘n cháº·t hÆ¡n, anh cÃ³ thá»ƒ truyá»n order_key vÃ  check)
 		if (!$user_id) {
-			// OPTIONAL harden: check order key từ URL nếu anh muốn
+			// OPTIONAL harden: check order key tá»« URL náº¿u anh muá»‘n
 			// $order_key = sanitize_text_field($_POST['order_key'] ?? '');
 			// if ($order_key !== $order->get_order_key()) wp_send_json_error([...]);
 		}
 
 		if ($order->has_status(['processing','completed'])) {
-			wp_send_json_error(['message' => 'Đơn đã thanh toán rồi']);
+			wp_send_json_error(['message' => 'ÄÆ¡n Ä‘Ã£ thanh toÃ¡n rá»“i']);
 		}
 		if ($order->has_status(['cancelled','refunded','failed'])) {
-			wp_send_json_error(['message' => 'Đơn không thể xác nhận ở trạng thái hiện tại']);
+			wp_send_json_error(['message' => 'ÄÆ¡n khÃ´ng thá»ƒ xÃ¡c nháº­n á»Ÿ tráº¡ng thÃ¡i hiá»‡n táº¡i']);
 		}
 
-		// Rate limit đơn giản theo order_id + IP
+		// Rate limit Ä‘Æ¡n giáº£n theo order_id + IP
 		$ip = $_SERVER['REMOTE_ADDR'] ?? '';
 		// Some shared hosting stacks strip Telegram's secret header before it reaches WP.
 		// Keep processing instead of returning 403 so the webhook flow can still run.
 		update_post_meta($order_id, '_ttck_customer_confirmed', time());
 		update_post_meta($order_id, '_ttck_customer_confirmed_ip', $ip);
 
-		// Ghi note để admin nhìn thấy ngay
-		$order->add_order_note('Khách đã bấm "Tôi đã chuyển khoản" (yêu cầu shop kiểm tra thủ công).');
+		// Ghi note Ä‘á»ƒ admin nhÃ¬n tháº¥y ngay
+		$order->add_order_note('KhÃ¡ch Ä‘Ã£ báº¥m "TÃ´i Ä‘Ã£ chuyá»ƒn khoáº£n" (yÃªu cáº§u shop kiá»ƒm tra thá»§ cÃ´ng).');
 
-		// (Tuỳ anh) gửi notify admin qua email
+		// (Tuá»³ anh) gá»­i notify admin qua email
 		$admin_email = get_option('admin_email');
 		wp_mail(
 			$admin_email,
-			'TTCK: Khách báo đã chuyển khoản - Order #' . $order_id,
-			"Khách vừa xác nhận đã chuyển khoản.\nOrder: #{$order_id}\nTổng tiền: " . $order->get_total() . "\n"
+			'TTCK: KhÃ¡ch bÃ¡o Ä‘Ã£ chuyá»ƒn khoáº£n - Order #' . $order_id,
+			"KhÃ¡ch vá»«a xÃ¡c nháº­n Ä‘Ã£ chuyá»ƒn khoáº£n.\nOrder: #{$order_id}\nTá»•ng tiá»n: " . $order->get_total() . "\n"
 		);
 
-		wp_send_json_success(['message' => 'Đã gửi yêu cầu. Shop sẽ kiểm tra và xác nhận sớm.']);
+		wp_send_json_success(['message' => 'ÄÃ£ gá»­i yÃªu cáº§u. Shop sáº½ kiá»ƒm tra vÃ  xÃ¡c nháº­n sá»›m.']);
 		}
 	//health check
 	public function auth_sync_status_ttck() {
@@ -532,7 +535,7 @@ class TTCKPayment
 		$new_order_statuses['wc-underpaid'] = __('Underpaid', 'thanh-toan-chuyen-khoan');
 		return $new_order_statuses;
 	}
-	//Hàm này có thể giúp tạo ra một class Bank mới.
+	//HÃ m nÃ y cÃ³ thá»ƒ giÃºp táº¡o ra má»™t class Bank má»›i.
 	public function gen_payment_gateway($gatewayName)
 	{
 		$WC_Base_TTCK->thankyou_page();
@@ -558,7 +561,7 @@ class TTCKPayment
 		//add_action('woocommerce_api_' . self::$webhook_route, array($this, 'pc_payment_handler'));
 
 		if ('yes' == $settings['bank_transfer']['enabled'] ) {
-			// chỗ này e tách ra ngoài code cho clean mà nó k nhận (gộp woocommerce_payment_gateways)
+			// chá»— nÃ y e tÃ¡ch ra ngoÃ i code cho clean mÃ  nÃ³ k nháº­n (gá»™p woocommerce_payment_gateways)
 			
 			require_once(TTCK_DIR . 'inc/banks/class-ttck-acb.php');
 			require_once(TTCK_DIR . 'inc/banks/class-ttck-mbbank.php');
@@ -911,7 +914,7 @@ class TTCKPayment
 				}
 			}
 			//message for telegram: Amount: %s\nDesc: %s\nDate: %s
-			$bankMsg = sprintf("Thông báo giao dịch:\nTrang web: %s\nSố tiền: %s\nMã: %s\nTin nhắn: %s",
+			$bankMsg = sprintf("ThÃ´ng bÃ¡o giao dá»‹ch:\nTrang web: %s\nSá»‘ tiá»n: %s\nMÃ£: %s\nTin nháº¯n: %s",
 					$domain,
 					number_format($transaction->amount),
 					ttck_parse_code($des,$this->settings['bank_transfer']['transaction_prefix'], $this->settings['bank_transfer']['case_insensitive']), 
@@ -946,16 +949,16 @@ class TTCKPayment
 			$date_transaction = date_create($transaction->when);
 			$interval = date_diff($today, $date_transaction);
 			if ($interval->format('%R%a') < -2) {
-				# code...Giao dịch quá cũ, không xử lý
+				# code...Giao dá»‹ch quÃ¡ cÅ©, khÃ´ng xá»­ lÃ½
 				wp_send_json (['error'=>__('Transaction is too old, not processed', 'thanh-toan-chuyen-khoan')]);
 				die();
 			}*/
 			$total = number_format($transaction->amount, 0);
-			$order_note = "QH Testpay thông báo nhận <b>{$total}</b> VND, nội dung <B>{$des}</B> chuyển vào <b>STK {$transaction->subAccId}</b>";
+			$order_note = "QH Testpay thÃ´ng bÃ¡o nháº­n <b>{$total}</b> VND, ná»™i dung <B>{$des}</B> chuyá»ƒn vÃ o <b>STK {$transaction->subAccId}</b>";
 			$order->add_order_note($order_note);
 			$order->update_meta_data('ttck_ndck', $des);
 
-			// $order_note_overpay = " thông báo <b>{$total}</b> VND, nội dung <b>$des</b> chuyển khoản dư vào <b>STK {$transaction->subAccId}</b>";
+			// $order_note_overpay = " thÃ´ng bÃ¡o <b>{$total}</b> VND, ná»™i dung <b>$des</b> chuyá»ƒn khoáº£n dÆ° vÃ o <b>STK {$transaction->subAccId}</b>";
 			$acceptable_difference = abs($this->settings['bank_transfer']['acceptable_difference']);
 			if ($paid < ($money  - $acceptable_difference>0? $money  - $acceptable_difference: $money )) {
 				$order->add_order_note(__('The order is underpaid so it is not completed', 'thanh-toan-chuyen-khoan'));
@@ -1026,12 +1029,30 @@ class TTCKPayment
 
 		wp_send_json($result);
 		die();
-		//TODO: Nghiên cứu việc gửi mail thông báo đơn hàng thanh toán hoàn tất.
+		//TODO: NghiÃªn cá»©u viá»‡c gá»­i mail thÃ´ng bÃ¡o Ä‘Æ¡n hÃ ng thanh toÃ¡n hoÃ n táº¥t.
 	}
 	
-	function load_plugin_textdomain()
+	
+public function restore_masked_secrets() {
+if (!is_admin() || empty($_POST['settings'])) return;
+
+$settings = isset($_POST['settings']) ? wp_unslash($_POST['settings']) : array();
+$stored = self::get_settings();
+
+// Restore webhook_secret if not changed
+if (isset($settings['telegram_webhook_secret']) && $settings['telegram_webhook_secret'] === '***UNCHANGED***') {
+$_POST['settings']['telegram_webhook_secret'] = $stored['telegram_webhook_secret'] ?? '';
+}
+
+// Restore tgs_hmac_secret if not changed
+if (isset($settings['tgs_hmac_secret']) && $settings['tgs_hmac_secret'] === '***UNCHANGED***') {
+$_POST['settings']['tgs_hmac_secret'] = $stored['tgs_hmac_secret'] ?? '';
+}
+}
+function load_plugin_textdomain()
 	{
 		load_plugin_textdomain($this->domain, false, dirname(plugin_basename(__FILE__))  . '/languages');
 	}
 }
 new TTCKPayment();
+
