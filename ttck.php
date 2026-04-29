@@ -176,11 +176,11 @@ class TTCKPayment
 		$payload = $request->get_json_params();
 		$chat_id = $this->extract_telegram_chat_id($payload);
 
-		if ($secure_token === '' && $telegram_token === '' && $webhook_secret === '') {
+		if ($secure_token === '' && $webhook_secret === '') {
 			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa cấu hình TTCK. Vào plugin → Lưu lại.");
 			return new WP_REST_Response(array(
 				'ok' => false,
-				'message' => 'Missing TTCK secure token/telegram token/webhook secret. Please save TTCK settings first.',
+				'message' => 'Missing TTCK secure token/webhook secret. Please save TTCK settings first.',
 			), 200);
 		}
 
@@ -205,20 +205,10 @@ class TTCKPayment
 		}
 		$provided_secret = $secret_header !== '' ? $secret_header : $secret_query;
 
-		$secret_valid = false;
-		if ($provided_secret !== '') {
-			if ($webhook_secret !== '' && hash_equals($webhook_secret, $provided_secret)) {
-				$secret_valid = true;
-			}
-			if ($secure_token !== '' && hash_equals($secure_token, $provided_secret)) {
-				$secret_valid = true;
-			}
-			if (!$secret_valid && $telegram_token !== '' && hash_equals($telegram_token, $provided_secret)) {
-				$secret_valid = true;
-			}
-		}
+		$expected_secret = $webhook_secret !== '' ? $webhook_secret : $secure_token;
+		$secret_valid = ($provided_secret !== '' && $expected_secret !== '' && hash_equals($expected_secret, $provided_secret));
 
-		if (!$secret_valid && $webhook_secret !== '') {
+		if (!$secret_valid) {
 			// Return 200 so Telegram doesn't keep retrying (Telegram retries on 4xx/5xx)
 			return new WP_REST_Response(array(
 				'ok' => false,
