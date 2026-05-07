@@ -23,6 +23,9 @@ require(__DIR__."/inc/functions.php");
 
 class TTCKPayment
 {
+	var $domain = 'thanh-toan-chuyen-khoan';
+	var $settings = array();
+	var $Admin_Page = null;
 	
 	static $oauth_settings = array(
 		//'email' => '',
@@ -67,7 +70,6 @@ class TTCKPayment
 	public function __construct()
 	{
 		// get the settings of the old version
-		$this->domain = 'thanh-toan-chuyen-khoan';
 		add_action('plugins_loaded', array($this, 'load_plugin_textdomain'));
 
 		add_action('init', array($this, 'init'));

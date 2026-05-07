@@ -13,6 +13,11 @@ if (!defined('ABSPATH')) {
  */
 class TTCK_Admin_Page
 {
+	var $get_list_banks = array();
+	var $get_list_bin = array();
+	var $get_status = array();
+	var $settings = array();
+	var $oauth_settings = array();
 
 	/**
 	 * @var string The message to display after saving settings
