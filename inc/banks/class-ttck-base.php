@@ -21,6 +21,27 @@ abstract class WC_Base_TTCK extends WC_Payment_Gateway
 	 */
 	public $locale;
 
+	/** @var string Bank identifier, overridden by each child class */
+	public $bank_id = '';
+
+	/** @var string Human-readable bank name, overridden by each child class */
+	public $bank_name = '';
+
+	/** @var string Payment instructions shown on thank-you page / emails */
+	public $instructions = '';
+
+	/** @var string Order content string */
+	public $order_content = '';
+
+	/** @var array TTCK plugin-level settings */
+	public $plugin_settings = [];
+
+	/** @var array OAuth settings for bank API */
+	public $oauth_settings = [];
+
+	/** @var array Configured bank account details for this gateway */
+	public $account_details = [];
+
 	/**
 	 * Constructor for the gateway.
 	 */
