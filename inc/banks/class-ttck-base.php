@@ -483,7 +483,14 @@ abstract class WC_Base_TTCK extends WC_Payment_Gateway
 			function fetchStatus(i){
 				if("wc-'.esc_js($order_status).'" == "'.esc_js($paid_status).'" || "'.esc_js($order_status).'" == "cancelled"){ return; }
 
-				document.getElementById("image_loading").style.display = "block";
+				// Trang thank-you render 1 block cho mỗi tài khoản ngân hàng, và nút
+				// "Kiểm tra thanh toán" cũng gọi lại hàm này. Nếu không khoá, mỗi lần
+				// gọi lại tạo thêm 1 setInterval -> N request/3 giây tới admin-ajax.php.
+				if (window.__ttckPolling) { return; }
+				window.__ttckPolling = true;
+
+				var loading = document.getElementById("image_loading");
+				if(loading) loading.style.display = "block";
 				var btn = document.querySelector(".submit_paid");
 				if(btn) btn.style.display="none";
 				var noTx = document.getElementById("noTransaction");
@@ -491,21 +498,22 @@ abstract class WC_Base_TTCK extends WC_Payment_Gateway
 
 				var timeTemp = 0;
 				var timer = setInterval(function(){
+					if(timeTemp >= 120000){ clearInterval(timer); window.__ttckPolling = false; return; }
+					timeTemp += 3000;
 					jQuery.ajax({
-						url : "'.esc_js(site_url('/wp-admin/admin-ajax.php')).'?__tm="+(+new Date),
+						url : "'.esc_js(admin_url('admin-ajax.php')).'?__tm="+(+new Date),
 						type : "post",
 						data: {action: "fetch_order_status_ttck", order_id: '.(int)$order_id.'},
 						success : function(resp){
 							if(resp == "'.esc_js($paid_status).'"){
-								// reload
+								clearInterval(timer);
 								if (location.href.indexOf("?") === -1) location.href += "?qa=1";
 								else location.href += "&qa=1";
+								return;
 							}
-							if(resp == "wc-cancelled"){ window.location.reload(); }
+							if(resp == "wc-cancelled"){ clearInterval(timer); window.location.reload(); }
 						}
 					});
-					if(timeTemp >= 120000){ clearInterval(timer); return; }
-					timeTemp += 3000;
 				}, 3000);
 			}
 
@@ -525,7 +533,7 @@ abstract class WC_Base_TTCK extends WC_Payment_Gateway
 					$btn.prop("disabled", true).text("Đang gửi yêu cầu...");
 
 					$.ajax({
-						url: "'.esc_js(site_url('/wp-admin/admin-ajax.php')).'?__tm="+(+new Date),
+						url: "'.esc_js(admin_url('admin-ajax.php')).'?__tm="+(+new Date),
 						type: "post",
 						data: {
 							action: "ttck_customer_confirm_transfer",
@@ -722,14 +730,17 @@ abstract class WC_Base_TTCK extends WC_Payment_Gateway
 			
 		if(is_numeric($acqId)) {
 			$format = "qr_only";
-			$img_url = "https://api.vietqr.io/{$acqId}/{$accountNo}/{$amount}/{$addInfo}/{$format}.jpg";
-			$pay_url = "https://api.vietqr.io/{$acqId}/{$accountNo}/{$amount}/{$addInfo}";
+			// $addInfo nằm trong path nên phải encode, nếu không dấu cách / ký tự
+			// đặc biệt trong nội dung chuyển khoản sẽ làm hỏng URL ảnh QR.
+			$addInfoSeg = rawurlencode($addInfo);
+			$img_url = "https://api.vietqr.io/{$acqId}/{$accountNo}/{$amount}/{$addInfoSeg}/{$format}.jpg";
+			$pay_url = "https://api.vietqr.io/{$acqId}/{$accountNo}/{$amount}/{$addInfoSeg}";
 		}
 		else {
 			$img_url = "";
 			$pay_url = "";
 			if($bank=='momo') {
-				$img_url = get_rest_url(null, "bck/v1/qrcode?app=momo&phone={$accountNo}&price={$amount}&content=".urlencode($addInfo));
+				$img_url = get_rest_url(null, "ttck/v1/qrcode?app=momo&phone={$accountNo}&price={$amount}&content=".urlencode($addInfo));
 			}
 			else if($bank=='viettelpay') {
 				$img_url = get_rest_url(null, "ttck/v1/qrcode?app=viettelpay&phone={$accountNo}&price={$amount}&content=".urlencode($addInfo));

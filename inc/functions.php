@@ -70,14 +70,18 @@ function ttck_getHeader(){
 
     return $headers;
 }
+/**
+ * Build the regex matching "<prefix><digits>" inside a bank transfer description.
+ *
+ * $insensitive === 'yes' means "bỏ qua hoa/thường", so it must add the `i` flag.
+ * $prefix comes from settings and can contain regex metacharacters, so it is quoted.
+ */
+function ttck_prefix_regex($prefix, $insensitive){
+	$flags = ($insensitive == 'yes') ? 'mi' : 'm';
+	return '/' . preg_quote((string) $prefix, '/') . '\d+/' . $flags;
+}
 function ttck_parse_code($des, $prefix, $insensitive){
-	//TODO : Rewrite this function.
-	//phân biệt
-	if ($insensitive=='yes') {
-		$re = '/'.$prefix.'\d+/m';
-	}else{
-		$re = '/'.$prefix.'\d+/mi';	//$this->get_option( 'transaction_prefix' )
-	}
+	$re = ttck_prefix_regex($prefix, $insensitive);
 
 	preg_match_all($re, $des, $matches, PREG_SET_ORDER, 0);
 
@@ -88,13 +92,7 @@ function ttck_parse_code($des, $prefix, $insensitive){
 	return $orderCode;
 }
 function ttck_parse_order_id($des, $prefix, $insensitive){
-	//TODO : Rewrite this function.
-	//phân biệt
-	if ($insensitive=='yes') {
-		$re = '/'.$prefix.'\d+/m';
-	}else{
-		$re = '/'.$prefix.'\d+/mi';	//$this->get_option( 'transaction_prefix' )
-	}
+	$re = ttck_prefix_regex($prefix, $insensitive);
 
 	preg_match_all($re, $des, $matches, PREG_SET_ORDER, 0);
 
@@ -185,20 +183,31 @@ function ttck_rest_qrcode() {
 	die();
 }
 
-add_filter( 'wp_kses_allowed_html', function($allowed_html){
+/**
+ * Cho phép <button>/<img> trong output của plugin.
+ *
+ * KHÔNG whitelist <script> hay thuộc tính onclick ở đây: filter này áp dụng cho
+ * MỌI lần gọi wp_kses()/wp_kses_post() của toàn site (comment, post content của
+ * contributor, các plugin khác...), nên whitelist script/onclick ở priority
+ * 999999 sẽ vô hiệu hoá lớp lọc XSS của WordPress trên toàn hệ thống.
+ * Markup của plugin được build sẵn trong PHP nên không cần đi qua kses.
+ */
+add_filter( 'wp_kses_allowed_html', function($allowed_html, $context){
+	if ($context !== 'post') {
+		return $allowed_html;
+	}
 	$atts = array(
 		'class' => array(),
 		'href'  => array(),
 		'rel'   => array(),
 		'title' => array(),
-		'onclick'=>array(),'value'=>array(),'src'=>array(),
-		'name'=>array(),'id'=>array(),'style'=>array(),'type'=>array(),'class'=>array(),
+		'value' => array(), 'src' => array(),
+		'name'  => array(), 'id'  => array(), 'style' => array(), 'type' => array(),
+		'alt'   => array(), 'width' => array(), 'height' => array(),
 	);
-	$allowed_html['style'] = $atts;
-	$allowed_html['script'] = $atts;
 	foreach(['button','img'] as $tag) $allowed_html[$tag] = $atts;
 	return $allowed_html;
-}, 999999);
+}, 10, 2);
 
 add_filter( 'safe_style_css', function( $styles ) {
     $styles[] = 'display';

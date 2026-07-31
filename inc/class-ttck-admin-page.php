@@ -53,11 +53,18 @@ class TTCK_Admin_Page
 	public function save_settings()
 	{
 
-		if (wp_verify_nonce($_REQUEST['ttck_nonce'], 'ttck_save_settings')) {
-			$settings = ttck_recursive_sanitize_text_field(isset($_POST['settings'])? $_POST['settings']: []);
+		// Trang cài đặt yêu cầu manage_options, nên handler lưu cũng phải kiểm tra
+		// quyền chứ không chỉ dựa vào nonce.
+		if (!current_user_can('manage_options')) {
+			return;
+		}
+
+		$nonce = isset($_REQUEST['ttck_nonce']) ? sanitize_text_field(wp_unslash($_REQUEST['ttck_nonce'])) : '';
+		if (wp_verify_nonce($nonce, 'ttck_save_settings')) {
+			$settings = ttck_recursive_sanitize_text_field(isset($_POST['settings'])? wp_unslash($_POST['settings']): []);
 			if(isset($this->settings['bank_transfer_accounts'])) $settings['bank_transfer_accounts'] = $this->settings['bank_transfer_accounts'];
 
-			if (strlen($this->settings['bank_transfer']['secure_token']) <= 0) {
+			if (strlen((string) ($this->settings['bank_transfer']['secure_token'] ?? '')) <= 0) {
 				$settings['bank_transfer']['secure_token'] = ttck_generate_random_string(16);
 			} else {
 				$settings['bank_transfer']['secure_token'] = $this->settings['bank_transfer']['secure_token'];
@@ -69,7 +76,9 @@ class TTCK_Admin_Page
 			if(!empty($settings['bank_transfer']['transaction_prefix'])) {
 				$settings['bank_transfer']['transaction_prefix'] = ttck_clean_prefix($settings['bank_transfer']['transaction_prefix']);	//$prefix =
 			}
-			$settings['bank_transfer']['extra_text'] = remove_accents($settings['bank_transfer']['extra_text']);
+			// extra_text không có trong $default_settings -> truy cập thẳng sẽ sinh
+			// "Undefined array key" + deprecated (truyền null vào remove_accents).
+			$settings['bank_transfer']['extra_text'] = remove_accents((string) ($settings['bank_transfer']['extra_text'] ?? ''));
 			//check if prefix changed
 			/*if(!empty($this->settings['bank_transfer']['transaction_prefix']) && $prefix!= $this->settings['bank_transfer']['transaction_prefix']) {
 				$this->reset_oauth();	//reset
