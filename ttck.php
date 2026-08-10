@@ -1,199 +1,574 @@
 <?php
 
 /**
- * Plugin Name: BizGPT - Thanh Toán Quét Mã QR Code Tự Động cho WooCommerce
+ * Plugin Name: BizGPT - Thanh Toán Quét Mã QR Code Tự Động
  * Plugin URI: https://bizgpt.vn
- * Description: Tự động xác nhận thanh toán quét mã QR Code MoMo, ViettelPay, VNPay, Vietcombank, Vietinbank, Techcombank, MB, ACB, VPBank, TPBank..
+ * Description: Sinh mã QR động (VietQR) và tự động xác nhận thanh toán chuyển khoản. Chạy độc lập, KHÔNG cần WooCommerce.
  * Author: BizGPT Team
  * Author URI: https://bizgpt.vn
  * Text Domain: thanh-toan-chuyen-khoan
  * Domain Path: /languages
- * Version: 1.0.0
+ * Version: 2.0.0
  * License: GNU General Public License v3.0
  */
 
 if (!defined('ABSPATH')) {
 	exit;
 }
+
 define('TTCK_DIR', plugin_dir_path(__FILE__));
 define('TTCK_URL', plugins_url('/', __FILE__));
 define('TTCK_TEST', 0);
-//require(__DIR__."/lib/phpqrcode/qrlib.php");
-require(__DIR__."/inc/functions.php");
+
+require_once TTCK_DIR . 'inc/functions.php';
+require_once TTCK_DIR . 'inc/class-ttck-banks.php';
+require_once TTCK_DIR . 'inc/class-ttck-payments.php';
+require_once TTCK_DIR . 'inc/class-ttck-api.php';
 
 class TTCKPayment
 {
 	var $domain = 'thanh-toan-chuyen-khoan';
 	var $settings = array();
 	var $Admin_Page = null;
-	
-	static $oauth_settings = array(
-		//'email' => '',
-	);
+
 	static $default_settings = array(
-
-		'bank_transfer'         =>
-		array(
-			'case_insensitive' => 'yes',
-			'enabled' => 'yes',
-			'title' => 'Chuyển khoản ngân hàng 24/7',
-			'secure_token' => '',
-			'transaction_prefix' => 'ABC',
+		'bank_transfer' => array(
+			'case_insensitive'      => 'yes',
+			'enabled'               => 'yes',
+			'title'                 => 'Chuyển khoản ngân hàng 24/7',
+			'secure_token'          => '',
+			'transaction_prefix'    => 'ABC',
+			'extra_text'            => '',
 			'acceptable_difference' => 1000,
-			'authorization_code' => '',
-			'viet_qr' => 'yes',
-
+			'viet_qr'               => 'yes',
 		),
-		'bank_transfer_accounts' =>
-		array(
-			/*array(
-				'account_name'   => '',
-				'account_number' => '',
-				'bank_name'      => '',
-				'bin'      => 0,
-				'connect_status'      => 0,
-				'plan_status'      => 0,
-				'is_show'      => 'yes',
-			),*/
-		),
-		'order_status' =>
-		array(
-			'order_status_after_paid'   => 'wc-completed',
-			'order_status_after_underpaid' => 'wc-processing',
-		),
+		// bank_id => array( array('account_name','account_number','bank_name'), ... )
+		'bank_transfer_accounts'  => array(),
+		// bank_id => array('enabled' => 'yes|no', 'title' => '', 'sort' => 0)
+		'bank_meta'               => array(),
+		'qr_engine'               => 'vietqr',   // vietqr | local
+		'payment_expire_minutes'  => 30,
+		'telegram_token'          => '',
+		'telegram_chatid'         => '',
 		'telegram_webhook_secret' => '',
-		'tgs_hmac_secret' => '',
-
+		'tgs_hmac_secret'         => '',
+		'webhook'                 => '',
+		'auto_check_status'       => 0,
 	);
-	
-	
+
 	public function __construct()
 	{
-		// get the settings of the old version
 		add_action('plugins_loaded', array($this, 'load_plugin_textdomain'));
-
 		add_action('init', array($this, 'init'));
-		register_activation_hook( __FILE__, array($this,'activate') );
-		register_deactivation_hook( __FILE__, array($this,'deactivate') );
+
+		register_activation_hook(__FILE__, array($this, 'activate'));
+		register_deactivation_hook(__FILE__, array($this, 'deactivate'));
+
 		$this->settings = self::get_settings();
 	}
-	function activate() {
-		if( version_compare(phpversion(), '5.6', '<')  ) {
+
+	function activate()
+	{
+		if (version_compare(phpversion(), '5.6', '<')) {
 			wp_die('You need to update your PHP version. Require: PHP 5.6+');
 		}
-		if(!extension_loaded('gd')) wp_die('Please activate PHP GD library.');
-		// Không redirect ở đây: activation hook chạy sau khi wp-admin đã xuất HTML,
-		// header() sẽ báo "headers already sent" và WordPress báo
-		// "plugin generated N characters of unexpected output during activation".
-		// Đánh dấu rồi redirect ở admin_init của request kế tiếp.
+		if (!extension_loaded('gd')) {
+			wp_die('Please activate PHP GD library.');
+		}
+
+		TTCK_Payments::install();
+		update_option('ttck_db_version', TTCK_Payments::DB_VERSION, true);
+		self::migrate_from_woocommerce();
+
+		// Không redirect ở đây: activation hook chạy sau khi wp-admin đã xuất HTML.
 		set_transient('ttck_activation_redirect', 1, 60);
 	}
-	function deactivate() {
-		;
+
+	function deactivate()
+	{
+		wp_clear_scheduled_hook('ttck_daily_maintenance');
 	}
-	
+
 	public function init()
 	{
-		// Handle masked secret fields restore.
-		// Phải chạy TRƯỚC main() vì TTCK_Admin_Page::save_settings() đọc $_POST
-		// ngay trong constructor (ở hook `init`), tức là trước `admin_init`.
+		// Phải chạy TRƯỚC khi TTCK_Admin_Page::save_settings() đọc $_POST.
 		$this->restore_masked_secrets();
 
-		// Redirect sau khi kích hoạt (không thể redirect trong activation hook).
+		TTCK_Payments::maybe_install();
+		self::migrate_from_woocommerce();
+
 		add_action('admin_init', array($this, 'maybe_activation_redirect'));
+		add_action('rest_api_init', array($this, 'register_rest_routes'));
 
-		if (class_exists('WooCommerce')) {
-			add_action('rest_api_init', array($this, 'register_rest_routes'));
-			// Run this plugin normally if WooCommerce is active
-			// Load the localization featureUnderpaid
+		$this->settings = self::get_settings();
 
-			$this->main();
-			// Add "Settings" link when the plugin is active
+		if (is_admin()) {
+			require_once TTCK_DIR . 'inc/class-ttck-admin-page.php';
+			$this->Admin_Page = new TTCK_Admin_Page();
+
 			add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_settings_link'));
-			/*add_filter('plugin_action_links_' . plugin_basename(__FILE__), function ($links) {
-				$settings = array('<a href="https://bck.haibasoft.com" target="_blank">' . __('Docs', 'woocommerce') . '</a>');
-				$links    = array_reverse(array_merge($links, $settings));
+			add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_assets'));
+		}
 
-				return $links;
-			});
-			add_filter('plugin_action_links_' . plugin_basename(__FILE__), function ($links) {
-				#$settings = array('<a href="https://wordpress.org/support/plugin/ttck/reviews/" target="_blank">' . __('Review', 'woocommerce') . '</a>');
-				#$links    = array_reverse(array_merge($links, $settings));
-				return $links;
-			});*/
-			// Đăng kí thêm trạng thái 
-			add_filter('wc_order_statuses', array($this, 'add_order_statuses'));
-			register_post_status('wc-paid', array(
-				'label'                     => __('Paid', 'thanh-toan-chuyen-khoan'),
-				'public'                    => true,
-				'exclude_from_search'       => false,
-				'show_in_admin_all_list'    => true,
-				'show_in_admin_status_list' => true,
-				'label_count'               => _n_noop(__('Paid', 'thanh-toan-chuyen-khoan') . ' (%s)', __('Paid', 'thanh-toan-chuyen-khoan') . ' (%s)')
-			));
-			register_post_status('wc-underpaid', array(
-				'label'                     =>  __('Underpaid', 'thanh-toan-chuyen-khoan'),
-				'public'                    => true,
-				'exclude_from_search'       => false,
-				'show_in_admin_all_list'    => true,
-				'show_in_admin_status_list' => true,
-				'label_count'               => _n_noop(__('Underpaid', 'thanh-toan-chuyen-khoan') . ' (%s)', __('Underpaid', 'thanh-toan-chuyen-khoan') . ' (%s)')
-			));
-			wp_enqueue_style('ttck-style', plugins_url('assets/css/style.css', __FILE__), array(), false, 'all');
-			wp_enqueue_script('ttck-qrcode', plugins_url('assets/js/easy.qrcode.js', __FILE__), array('jquery'), '', true);
-			if(is_admin() && isset($_GET['page']) && $_GET['page']=='ttck') {
-				wp_enqueue_script('ttck-js', plugins_url('assets/js/js.js', __FILE__), array('jquery'), '', true);
-			}
-			
-			add_action('wp_ajax_nopriv_fetch_order_status_ttck', array($this, 'fetch_order_status'));
-			add_action('wp_ajax_fetch_order_status_ttck', array($this, 'fetch_order_status'));
-			
-			add_action('wp_ajax_nopriv_paid_order_ttck', array($this, 'pc_payment_handler'));
-			add_action('wp_ajax_paid_order_ttck', array($this, 'pc_payment_handler'));
+		// Webhook từ app ngân hàng trên điện thoại.
+		add_action('wp_ajax_nopriv_paid_order_ttck', array($this, 'pc_payment_handler'));
+		add_action('wp_ajax_paid_order_ttck', array($this, 'pc_payment_handler'));
 
-			//add_action('wp_ajax_nopriv_auth_app_ttck', array($this, 'auth_app_ttck'));
-			//add_action('wp_ajax_auth_app_ttck', array($this, 'auth_app_ttck'));
-			
-			add_action('wp_ajax_nopriv_auth_sync_status_ttck', array($this, 'auth_sync_status_ttck'));
-			add_action('wp_ajax_auth_sync_status_ttck', array($this, 'auth_sync_status_ttck'));
+		// Poll trạng thái thanh toán.
+		add_action('wp_ajax_nopriv_fetch_order_status_ttck', array($this, 'fetch_order_status'));
+		add_action('wp_ajax_fetch_order_status_ttck', array($this, 'fetch_order_status'));
 
-			add_action('wp_ajax_ttck_customer_confirm_transfer', array($this, 'ttck_customer_confirm_transfer'));
-			add_action('wp_ajax_nopriv_ttck_customer_confirm_transfer', array($this, 'ttck_customer_confirm_transfer'));
+		add_action('wp_ajax_nopriv_auth_sync_status_ttck', array($this, 'auth_sync_status_ttck'));
+		add_action('wp_ajax_auth_sync_status_ttck', array($this, 'auth_sync_status_ttck'));
 
-		} else {
-			// Throw a notice if WooCommerce is NOT active
-			add_action('admin_notices', array($this, 'notice_if_not_woocommerce'));
+		// Dọn các yêu cầu thanh toán quá hạn.
+		add_action('ttck_daily_maintenance', array('TTCK_Payments', 'expire_stale'));
+		if (!wp_next_scheduled('ttck_daily_maintenance')) {
+			wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'ttck_daily_maintenance');
 		}
 	}
+
+	/**
+	 * CSS/JS chỉ nạp trên các trang cài đặt của plugin.
+	 */
+	public function enqueue_admin_assets()
+	{
+		$page = isset($_GET['page']) ? sanitize_key(wp_unslash($_GET['page'])) : '';
+		if (strpos($page, 'ttck') !== 0) {
+			return;
+		}
+
+		wp_enqueue_style('ttck-style', TTCK_URL . 'assets/css/style.css', array(), '2.0.0');
+		wp_enqueue_script('ttck-qrcode', TTCK_URL . 'assets/js/easy.qrcode.js', array('jquery'), '2.0.0', true);
+		wp_enqueue_script('ttck-js', TTCK_URL . 'assets/js/js.js', array('jquery'), '2.0.0', true);
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Cấu hình
+	 * ------------------------------------------------------------------ */
+
+	static function get_settings()
+	{
+		$settings = get_option('ttck', self::$default_settings);
+		if (!is_array($settings)) {
+			$settings = array();
+		}
+
+		// wp_parse_args() chỉ merge cấp 1 nên các key con thiếu vẫn undefined.
+		return self::merge_defaults($settings, self::$default_settings);
+	}
+
+	static function merge_defaults(array $settings, array $defaults)
+	{
+		foreach ($defaults as $key => $default_value) {
+			if (!array_key_exists($key, $settings)) {
+				$settings[$key] = $default_value;
+			} elseif (is_array($default_value) && is_array($settings[$key]) && $key !== 'bank_transfer_accounts') {
+				$settings[$key] = self::merge_defaults($settings[$key], $default_value);
+			}
+		}
+
+		return $settings;
+	}
+
+	/**
+	 * Đọc một cấu hình. $key có thể là chuỗi hoặc mảng đường dẫn lồng nhau.
+	 *
+	 *     TTCKPayment::get_setting('qr_engine', 'vietqr');
+	 *     TTCKPayment::get_setting(['bank_transfer', 'transaction_prefix'], '');
+	 */
+	static function get_setting($key, $default = null)
+	{
+		$value = self::get_settings();
+
+		foreach ((array) $key as $segment) {
+			if (!is_array($value) || !array_key_exists($segment, $value)) {
+				return $default;
+			}
+			$value = $value[$segment];
+		}
+
+		return $value;
+	}
+
+	static function update_settings(array $data)
+	{
+		if (!empty($data)) {
+			update_option('ttck', $data);
+		}
+	}
+
+	/**
+	 * Trạng thái bật/tắt và tiêu đề từng ngân hàng trước đây nằm trong option
+	 * `woocommerce_ttck_up_<bank>_settings` của WooCommerce. Chuyển một lần sang
+	 * `ttck[bank_meta]` để bỏ WooCommerce mà không mất cấu hình của 650 site.
+	 */
+	static function migrate_from_woocommerce()
+	{
+		if (get_option('ttck_wc_migrated')) {
+			return;
+		}
+
+		$settings = self::get_settings();
+		$accounts = is_array($settings['bank_transfer_accounts']) ? $settings['bank_transfer_accounts'] : array();
+		$meta     = is_array($settings['bank_meta']) ? $settings['bank_meta'] : array();
+		$sort     = 0;
+
+		foreach (array_keys($accounts) as $bank_id) {
+			$bank_id = strtolower((string) $bank_id);
+			if (isset($meta[$bank_id])) {
+				continue;
+			}
+
+			$wc_settings = get_option('woocommerce_ttck_up_' . $bank_id . '_settings', array());
+			$wc_settings = is_array($wc_settings) ? $wc_settings : array();
+
+			$meta[$bank_id] = array(
+				'enabled' => (isset($wc_settings['enabled']) && 'yes' === $wc_settings['enabled']) ? 'yes' : 'no',
+				'title'   => isset($wc_settings['title']) ? (string) $wc_settings['title'] : '',
+				'sort'    => $sort++,
+			);
+		}
+
+		$settings['bank_meta'] = $meta;
+		self::update_settings($settings);
+		update_option('ttck_wc_migrated', 1, true);
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Danh mục ngân hàng (giữ tên hàm cũ cho code đang gọi sẵn)
+	 * ------------------------------------------------------------------ */
+
+	static function get_list_banks()
+	{
+		$banks = array();
+		foreach (TTCK_Banks::all() as $id => $bank) {
+			$banks[$id] = $bank['label'];
+		}
+
+		return $banks;
+	}
+
+	/**
+	 * @return array bin => bank_id
+	 */
+	static function get_list_bin()
+	{
+		$bins = array();
+		foreach (TTCK_Banks::all() as $id => $bank) {
+			if ($bank['bin'] !== '') {
+				$bins[$bank['bin']] = $id;
+			}
+		}
+
+		return $bins;
+	}
+
+	static function get_bank_icon($name, $img = false)
+	{
+		$url = TTCK_Banks::icon_url($name);
+		if ($url === '') {
+			return $img ? '' : '';
+		}
+
+		return $img
+			? '<img class="ttck-bank-icon" title="' . esc_attr(strtoupper($name)) . '" src="' . esc_url($url) . '"/>'
+			: $url;
+	}
+
+	/**
+	 * Gắn thêm chuỗi ngẫu nhiên trước mã giao dịch (nếu admin có cấu hình).
+	 */
+	static function transaction_text($code, $settings = null)
+	{
+		if ($settings === null) {
+			$settings = self::get_settings();
+		}
+
+		$texts = !empty($settings['bank_transfer']['extra_text']) ? $settings['bank_transfer']['extra_text'] : '';
+		if ($texts) {
+			$texts = array_filter(explode("\n", $texts));
+			if (count($texts)) {
+				return $texts[array_rand($texts)] . ' ' . $code;
+			}
+		}
+
+		return $code;
+	}
+
+	public function add_settings_link($links)
+	{
+		$settings = array('<a href="' . admin_url('admin.php?page=ttck') . '">' . __('Settings', 'thanh-toan-chuyen-khoan') . '</a>');
+
+		return array_reverse(array_merge($links, $settings));
+	}
+
+	/* ---------------------------------------------------------------------
+	 * REST
+	 * ------------------------------------------------------------------ */
 
 	public function register_rest_routes()
 	{
 		register_rest_route('ttck/v1', '/telegram-webhook', array(
-			'methods' => 'POST',
-			'callback' => array($this, 'telegram_webhook_handler'),
+			'methods'             => 'POST',
+			'callback'            => array($this, 'telegram_webhook_handler'),
+			'permission_callback' => '__return_true',
+		));
+
+		register_rest_route('ttck/v1', '/qr', array(
+			'methods'             => 'GET',
+			'callback'            => array($this, 'render_payment_qr'),
 			'permission_callback' => '__return_true',
 		));
 	}
 
+	/**
+	 * Render ảnh QR của một yêu cầu thanh toán ngay tại server.
+	 */
+	public function render_payment_qr($request)
+	{
+		$pid = (int) $request->get_param('pid');
+		$key = (string) $request->get_param('k');
+
+		$payment = TTCK_Payments::get($pid);
+		if (!$payment || $key === '' || !hash_equals((string) $payment['qr_key'], $key)) {
+			return new WP_REST_Response(array('ok' => false, 'message' => 'Not found'), 404);
+		}
+
+		$bank   = TTCK_Banks::get($payment['bank_id']);
+		$amount = (int) round((float) $payment['amount']);
+		$text   = '';
+
+		if ($payment['bin'] !== '' && is_numeric($payment['bin'])) {
+			$text = TTCK_Banks::vietqr_payload($payment['bin'], $payment['account_number'], $amount, $payment['content']);
+		} elseif ('momo' === $bank['qr']) {
+			$text = sprintf('2|99|%s|||0|0|%d|%s|transfer_myqr', $payment['account_number'], $amount, $payment['content']);
+		} elseif ('viettelpay' === $bank['qr']) {
+			$text = wp_json_encode(array(
+				'bankCode'        => 'VTT',
+				'bankcodeList'    => array('VTT'),
+				'cust_mobile'     => $payment['account_number'],
+				'transAmountList' => array($amount),
+				'trans_amount'    => $amount,
+				'trans_content'   => $payment['content'],
+				'transfer_type'   => 'MYQR',
+			));
+		}
+
+		if ($text === '') {
+			return new WP_REST_Response(array('ok' => false, 'message' => 'Bank does not support QR'), 400);
+		}
+
+		require_once TTCK_DIR . 'lib/phpqrcode/qrlib.php';
+
+		nocache_headers();
+		header('Content-Type: image/png');
+		QRcode::png($text, false, QR_ECLEVEL_M, 8, 2);
+		exit;
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Trạng thái thanh toán
+	 * ------------------------------------------------------------------ */
+
+	public function auth_sync_status_ttck()
+	{
+		wp_send_json(array(
+			'oauth_status' => (bool) self::get_setting(array('bank_transfer', 'secure_token'), ''),
+			'timestamp'    => time(),
+		));
+	}
+
+	/**
+	 * Trả về trạng thái của một yêu cầu thanh toán.
+	 * Nhận `payment_id` (mới) hoặc `order_id` (tên tham số cũ).
+	 */
+	public function fetch_order_status()
+	{
+		$id = (int) ($_REQUEST['payment_id'] ?? $_REQUEST['order_id'] ?? 0);
+
+		$status = $id > 0 ? TTCK_API::get_status($id) : null;
+		if (!$status) {
+			wp_send_json(array('status' => 'not_found', 'is_paid' => false));
+		}
+
+		wp_send_json($status);
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Webhook nhận biến động số dư (từ app điện thoại)
+	 * ------------------------------------------------------------------ */
+
+	public function pc_payment_handler()
+	{
+		$txtBody  = file_get_contents('php://input');
+		$jsonBody = json_decode($txtBody);
+
+		if (!$txtBody || !$jsonBody) {
+			wp_send_json(array('error' => 'Missing body'));
+		}
+
+		if (isset($jsonBody->error) && $jsonBody->error != 0) {
+			wp_send_json(array('error' => 'An error occurred'));
+		}
+
+		$header = ttck_getHeader();
+		$token  = isset($header['Secure-Token']) ? $header['Secure-Token'] : '';
+
+		// So sánh hằng thời gian, phân biệt hoa/thường.
+		$expected_token = (string) self::get_setting(array('bank_transfer', 'secure_token'), '');
+		if ($expected_token === '' || !hash_equals($expected_token, (string) $token)) {
+			wp_send_json(array('error' => 'Missing secure_token or wrong secure_token'));
+		}
+
+		$settings         = self::get_settings();
+		$prefix           = (string) $settings['bank_transfer']['transaction_prefix'];
+		$case_insensitive = $settings['bank_transfer']['case_insensitive'];
+
+		$result  = array('msg' => array(), 'error' => 1, 'rawInput' => $txtBody);
+		$bankMsg = '';
+		$domain  = parse_url(home_url(), PHP_URL_HOST);
+
+		if (!empty($jsonBody->data)) {
+			foreach ($jsonBody->data as $transaction) {
+				$result['_ok'] = 1;
+
+				$des = $transaction->description;
+				if (ttck_is_JSON($des)) {
+					$desJson = is_string($des) ? json_decode($des, true) : $des;
+					if (is_array($desJson) && isset($desJson['code'])) {
+						$des = $desJson['code'];
+					}
+				}
+
+				$bankMsg = sprintf(
+					"Thông báo giao dịch:\nTrang web: %s\nSố tiền: %s\nMã: %s\nTin nhắn: %s",
+					$domain,
+					number_format($transaction->amount),
+					ttck_parse_code($des, $prefix, $case_insensitive),
+					$transaction->description
+				);
+
+				$ref_code = ttck_parse_code($des, $prefix, $case_insensitive);
+				if (is_null($ref_code)) {
+					$result['msg'][] = 'Payment code not found from transaction content: ' . $des;
+					continue;
+				}
+
+				$payment = TTCK_Payments::get_by_ref($ref_code);
+				if (!$payment) {
+					// Dự phòng: mã cũ có thể lệch hoa/thường so với lúc tạo.
+					$payment_id = ttck_parse_order_id($des, $prefix, $case_insensitive);
+					$payment    = $payment_id ? TTCK_Payments::get($payment_id) : null;
+				}
+
+				if (!$payment) {
+					$result['msg'][] = 'Payment not found: ' . $ref_code;
+					continue;
+				}
+
+				$settled = TTCK_Payments::settle($payment['id'], $transaction->amount, array(
+					'description' => (string) $transaction->description,
+					'account'     => isset($transaction->subAccId) ? (string) $transaction->subAccId : '',
+				));
+
+				if (is_wp_error($settled)) {
+					$code = $settled->get_error_code();
+					if ('ttck_already_paid' === $code) {
+						$result['error']  = 0;
+						$result['msg'][]  = 'Transaction processed before ' . $ref_code . ' success';
+						break;
+					}
+					$result['error'] = 1;
+					$result['msg'][] = $settled->get_error_message();
+					continue;
+				}
+
+				if (TTCK_Payments::STATUS_PAID === $settled['status']) {
+					$result['error'] = 0;
+					$result['msg'][] = 'Transaction processing ' . $ref_code . ' success';
+
+					$tolerance = abs((float) $settings['bank_transfer']['acceptable_difference']);
+					if ((float) $settled['paid_amount'] > (float) $settled['amount'] + $tolerance) {
+						$result['msg'][] = __('Order has been overpaid', 'thanh-toan-chuyen-khoan');
+					}
+					break;
+				}
+
+				$result['error'] = 1;
+				$result['msg'][] = __('The order is underpaid so it is not completed', 'thanh-toan-chuyen-khoan');
+			}
+		}
+
+		$this->notify_telegram_group($bankMsg);
+		$this->forward_to_external_webhook($txtBody, $result);
+
+		$result['msg'] = join('. ', $result['msg']);
+
+		wp_send_json($result);
+	}
+
+	private function notify_telegram_group($message)
+	{
+		$settings = self::get_settings();
+
+		if (empty($settings['telegram_token']) || empty($settings['telegram_chatid']) || $message === '') {
+			return;
+		}
+
+		$token = trim($settings['telegram_token']);
+		if (substr($token, 0, 3) !== 'bot') {
+			$token = 'bot' . $token;
+		}
+
+		wp_remote_get(
+			'https://api.telegram.org/' . $token . '/sendMessage?chat_id=' . rawurlencode(trim($settings['telegram_chatid']))
+				. '&text=' . rawurlencode(substr($message, 0, 4000)),
+			array('timeout' => 20, 'httpversion' => '1.1')
+		);
+	}
+
+	private function forward_to_external_webhook($txtBody, &$result)
+	{
+		$settings = self::get_settings();
+
+		if (empty($settings['webhook']) || !filter_var($settings['webhook'], FILTER_VALIDATE_URL)) {
+			return;
+		}
+
+		$resp = wp_remote_post($settings['webhook'], array(
+			'method'      => 'POST',
+			'timeout'     => 20,
+			'redirection' => 5,
+			'blocking'    => false,
+			'headers'     => array('Content-Type' => 'application/json'),
+			'body'        => $txtBody,
+		));
+
+		if (is_wp_error($resp)) {
+			$result['msg'][] = $resp->get_error_message();
+		}
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Telegram webhook (chuyển tiếp tin nhắn biến động số dư)
+	 * ------------------------------------------------------------------ */
+
 	public function telegram_webhook_handler($request)
 	{
 		$settings = self::get_settings();
-		$secure_token = isset($settings['bank_transfer']['secure_token'])
-			? trim((string) $settings['bank_transfer']['secure_token'])
-			: '';
-		$telegram_token = isset($settings['telegram_token'])
-			? trim((string) $settings['telegram_token'])
-			: '';
-		$webhook_secret = isset($settings['telegram_webhook_secret'])
-			? trim((string) $settings['telegram_webhook_secret'])
-			: '';
+
+		$secure_token   = trim((string) $settings['bank_transfer']['secure_token']);
+		$telegram_token = trim((string) $settings['telegram_token']);
+		$webhook_secret = trim((string) $settings['telegram_webhook_secret']);
+
 		$payload = $request->get_json_params();
 		$chat_id = $this->extract_telegram_chat_id($payload);
 
 		if ($secure_token === '' && $webhook_secret === '') {
 			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa cấu hình TTCK. Vào plugin → Lưu lại.");
 			return new WP_REST_Response(array(
-				'ok' => false,
+				'ok'      => false,
 				'message' => 'Missing TTCK secure token/webhook secret. Please save TTCK settings first.',
 			), 200);
 		}
@@ -213,25 +588,22 @@ class TTCKPayment
 				}
 			}
 		}
+
 		$secret_query = trim((string) $request->get_param('token'));
 		if ($secret_query === '' && isset($_GET['token'])) {
 			$secret_query = sanitize_text_field(wp_unslash($_GET['token']));
 		}
+
 		$provided_secret = $secret_header !== '' ? $secret_header : $secret_query;
-
 		$expected_secret = $webhook_secret !== '' ? $webhook_secret : $secure_token;
-		$secret_valid = ($provided_secret !== '' && $expected_secret !== '' && hash_equals($expected_secret, $provided_secret));
 
-		if (!$secret_valid) {
-			// Return 200 so Telegram doesn't keep retrying (Telegram retries on 4xx/5xx)
-			return new WP_REST_Response(array(
-				'ok' => false,
-				'message' => 'Invalid webhook secret.',
-			), 200);
+		if (!($provided_secret !== '' && $expected_secret !== '' && hash_equals($expected_secret, $provided_secret))) {
+			// Trả 200 để Telegram không retry liên tục.
+			return new WP_REST_Response(array('ok' => false, 'message' => 'Invalid webhook secret.'), 200);
 		}
 
-		// HMAC signature verification (optional – only enforced when tgs_hmac_secret is configured)
-		$hmac_secret = isset($settings['tgs_hmac_secret']) ? trim((string) $settings['tgs_hmac_secret']) : '';
+		// Xác thực chữ ký HMAC (chỉ bắt buộc khi đã cấu hình tgs_hmac_secret).
+		$hmac_secret = trim((string) $settings['tgs_hmac_secret']);
 		if ($hmac_secret !== '') {
 			$ts    = trim((string) ($request->get_header('x-tgs-timestamp') ?: ''));
 			$nonce = trim((string) ($request->get_header('x-tgs-nonce') ?: ''));
@@ -240,41 +612,32 @@ class TTCKPayment
 			if ($ts === '' || $nonce === '' || $sig === '') {
 				return new WP_REST_Response(array('ok' => false, 'message' => 'Missing HMAC headers.'), 200);
 			}
-
-			// Reject requests older/newer than 120 seconds
 			if (abs(time() - intval($ts)) > 120) {
 				return new WP_REST_Response(array('ok' => false, 'message' => 'Request timestamp expired.'), 200);
 			}
 
-			// Replay protection: store nonce in transient for 5 minutes
 			$nonce_key = 'tgs_nonce_' . preg_replace('/[^a-zA-Z0-9\-]/', '', substr($nonce, 0, 64));
 			if (get_transient($nonce_key)) {
 				return new WP_REST_Response(array('ok' => false, 'message' => 'Nonce already used.'), 200);
 			}
 			set_transient($nonce_key, 1, 300);
 
-			// Rebuild canonical string and verify
-			$body_hash = hash('sha256', $request->get_body());
-			$canonical = $ts . "\n" . $nonce . "\n" . $body_hash;
-			$expected  = hash_hmac('sha256', $canonical, $hmac_secret);
-			if (!hash_equals($expected, $sig)) {
+			$canonical = $ts . "\n" . $nonce . "\n" . hash('sha256', $request->get_body());
+			if (!hash_equals(hash_hmac('sha256', $canonical, $hmac_secret), $sig)) {
 				return new WP_REST_Response(array('ok' => false, 'message' => 'Invalid HMAC signature.'), 200);
 			}
 		}
 
 		if (!is_array($payload)) {
-			return new WP_REST_Response(array(
-				'ok' => false,
-				'message' => 'Invalid Telegram payload.',
-			), 200);
+			return new WP_REST_Response(array('ok' => false, 'message' => 'Invalid Telegram payload.'), 200);
 		}
 
 		$text = $this->extract_telegram_text($payload);
 		if ($text === '') {
 			return new WP_REST_Response(array(
-				'ok' => true,
+				'ok'       => true,
 				'accepted' => false,
-				'message' => 'No message text/caption found.',
+				'message'  => 'No message text/caption found.',
 			), 200);
 		}
 
@@ -282,102 +645,106 @@ class TTCKPayment
 		if ($amount <= 0) {
 			$this->send_telegram_reply($telegram_token, $chat_id, "❓ Không đọc được số tiền từ tin nhắn.");
 			return new WP_REST_Response(array(
-				'ok' => true,
+				'ok'       => true,
 				'accepted' => false,
-				'message' => 'Cannot parse transfer amount from Telegram message.',
-				'text' => $text,
+				'message'  => 'Cannot parse transfer amount from Telegram message.',
+				'text'     => $text,
 			), 200);
 		}
 
 		if ($secure_token === '') {
 			$this->send_telegram_reply($telegram_token, $chat_id, "⚠️ Chưa có secure token. Vào cài đặt TTCK → Lưu lại.");
 			return new WP_REST_Response(array(
-				'ok' => false,
+				'ok'       => false,
 				'accepted' => false,
-				'message' => 'Missing TTCK secure token. Please click Save on TTCK settings once.',
+				'message'  => 'Missing TTCK secure token. Please click Save on TTCK settings once.',
 			), 200);
 		}
 
-		$ajax_url = add_query_arg('action', 'paid_order_ttck', admin_url('admin-ajax.php'));
-		$ttck_body = array(
-			'data' => array(
-				array(
-					'amount' => $amount,
-					'description' => $text,
-					'subAccId' => 'telegram',
-				),
-			),
-		);
-
-		$response = wp_remote_post($ajax_url, array(
+		$response = wp_remote_post(add_query_arg('action', 'paid_order_ttck', admin_url('admin-ajax.php')), array(
 			'timeout' => 20,
 			'headers' => array(
 				'Content-Type' => 'application/json',
 				'Secure-Token' => $secure_token,
 			),
-			'body' => wp_json_encode($ttck_body),
+			'body'    => wp_json_encode(array(
+				'data' => array(
+					array(
+						'amount'      => $amount,
+						'description' => $text,
+						'subAccId'    => 'telegram',
+					),
+				),
+			)),
 		));
 
 		if (is_wp_error($response)) {
 			$this->send_telegram_reply($telegram_token, $chat_id, "❌ Lỗi kết nối nội bộ: " . $response->get_error_message());
 			return new WP_REST_Response(array(
-				'ok' => false,
+				'ok'       => false,
 				'accepted' => true,
-				'message' => $response->get_error_message(),
+				'message'  => $response->get_error_message(),
 			), 200);
 		}
 
 		$http_code = intval(wp_remote_retrieve_response_code($response));
-		$body_raw = (string) wp_remote_retrieve_body($response);
-		// Strip UTF-8 BOM if present (some PHP configs output BOM before JSON)
-		$body_raw = ltrim($body_raw, "\xEF\xBB\xBF");
-		$decoded = json_decode($body_raw, true);
+		$body_raw  = ltrim((string) wp_remote_retrieve_body($response), "\xEF\xBB\xBF");
+		$decoded   = json_decode($body_raw, true);
 
-		// Build clean Vietnamese reply message
-		$amount_fmt = number_format($amount, 0, '.', '.') . 'đ';
-		$prefix = isset($settings['bank_transfer']['transaction_prefix']) ? $settings['bank_transfer']['transaction_prefix'] : '';
-		$case_insensitive = isset($settings['bank_transfer']['case_insensitive']) ? $settings['bank_transfer']['case_insensitive'] : false;
-		$order_id_parsed = function_exists('ttck_parse_order_id') ? ttck_parse_order_id($text, $prefix, $case_insensitive) : null;
-		$order_label = $order_id_parsed ? '#' . $order_id_parsed : '';
-
-		if (is_array($decoded)) {
-			$msg_text = '';
-			if (isset($decoded['msg'])) {
-				$msg_text = is_array($decoded['msg']) ? implode(' ', $decoded['msg']) : (string) $decoded['msg'];
-				$msg_text = trim($msg_text);
-			}
-			if (!empty($decoded['error'])) {
-				// error is non-zero (failure)
-				if (is_string($decoded['error']) && stripos($decoded['error'], 'not found') !== false) {
-					$reply_message = "❌ Không tìm thấy đơn hàng" . ($order_label ? " $order_label" : '') . ".";
-				} elseif (stripos($msg_text, 'underpaid') !== false || stripos($msg_text, 'thieu tien') !== false) {
-					$reply_message = "⚠️ Đơn $order_label thiếu tiền: nhận {$amount_fmt} / cần thanh toán đủ.";
-				} elseif (stripos($msg_text, 'cancelled') !== false) {
-					$reply_message = "❌ Đơn $order_label đã bị huỷ, không xử lý.";
-				} else {
-					$reply_message = "⚠️ Chưa đổi trạng thái đơn $order_label. " . ($msg_text ?: 'Có lỗi xảy ra.');
-				}
-			} else {
-				// error == 0 (success)
-				if (stripos($msg_text, 'processed before') !== false) {
-					$reply_message = "ℹ️ Đơn $order_label đã được xử lý trước đó.";
-				} elseif (stripos($msg_text, 'overpaid') !== false) {
-					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} (dư tiền).";
-				} else {
-					$reply_message = "✅ Xác nhận thanh toán đơn $order_label - {$amount_fmt} thành công.";
-				}
-			}
-		} else {
-			$reply_message = "⚠️ Phản hồi không xác định (HTTP $http_code).";
-		}
-		$this->send_telegram_reply($telegram_token, $chat_id, $reply_message);
+		$this->send_telegram_reply(
+			$telegram_token,
+			$chat_id,
+			$this->build_telegram_reply($decoded, $amount, $text, $settings, $http_code)
+		);
 
 		return new WP_REST_Response(array(
-			'ok' => true,
-			'accepted' => true,
+			'ok'             => true,
+			'accepted'       => true,
 			'forward_status' => $http_code,
 			'forward_result' => is_array($decoded) ? $decoded : $body_raw,
 		), 200);
+	}
+
+	private function build_telegram_reply($decoded, $amount, $text, $settings, $http_code)
+	{
+		$amount_fmt = number_format($amount, 0, '.', '.') . 'đ';
+		$ref_code   = ttck_parse_code(
+			$text,
+			$settings['bank_transfer']['transaction_prefix'],
+			$settings['bank_transfer']['case_insensitive']
+		);
+		$label = $ref_code ? '#' . $ref_code : '';
+
+		if (!is_array($decoded)) {
+			return "⚠️ Phản hồi không xác định (HTTP $http_code).";
+		}
+
+		$msg_text = '';
+		if (isset($decoded['msg'])) {
+			$msg_text = trim(is_array($decoded['msg']) ? implode(' ', $decoded['msg']) : (string) $decoded['msg']);
+		}
+
+		if (!empty($decoded['error'])) {
+			if (stripos($msg_text, 'not found') !== false) {
+				return "❌ Không tìm thấy yêu cầu thanh toán" . ($label ? " $label" : '') . '.';
+			}
+			if (stripos($msg_text, 'underpaid') !== false) {
+				return "⚠️ Giao dịch $label thiếu tiền: nhận {$amount_fmt}.";
+			}
+			if (stripos($msg_text, 'cancel') !== false) {
+				return "❌ Yêu cầu $label đã bị huỷ, không xử lý.";
+			}
+			return "⚠️ Chưa xác nhận được $label. " . ($msg_text ?: 'Có lỗi xảy ra.');
+		}
+
+		if (stripos($msg_text, 'processed before') !== false) {
+			return "ℹ️ Giao dịch $label đã được xử lý trước đó.";
+		}
+		if (stripos($msg_text, 'overpaid') !== false) {
+			return "✅ Xác nhận thanh toán $label - {$amount_fmt} (dư tiền).";
+		}
+
+		return "✅ Xác nhận thanh toán $label - {$amount_fmt} thành công.";
 	}
 
 	private function extract_telegram_text($payload)
@@ -387,12 +754,12 @@ class TTCKPayment
 		}
 
 		$candidates = array(
-			isset($payload['message']['text']) ? $payload['message']['text'] : '',
-			isset($payload['message']['caption']) ? $payload['message']['caption'] : '',
-			isset($payload['channel_post']['text']) ? $payload['channel_post']['text'] : '',
-			isset($payload['channel_post']['caption']) ? $payload['channel_post']['caption'] : '',
-			isset($payload['edited_message']['text']) ? $payload['edited_message']['text'] : '',
-			isset($payload['edited_message']['caption']) ? $payload['edited_message']['caption'] : '',
+			$payload['message']['text'] ?? '',
+			$payload['message']['caption'] ?? '',
+			$payload['channel_post']['text'] ?? '',
+			$payload['channel_post']['caption'] ?? '',
+			$payload['edited_message']['text'] ?? '',
+			$payload['edited_message']['caption'] ?? '',
 		);
 
 		foreach ($candidates as $candidate) {
@@ -410,23 +777,20 @@ class TTCKPayment
 			return 0;
 		}
 
-		$chat_id = 0;
-		if (isset($payload['message']['chat']['id'])) {
-			$chat_id = intval($payload['message']['chat']['id']);
-		} elseif (isset($payload['channel_post']['chat']['id'])) {
-			$chat_id = intval($payload['channel_post']['chat']['id']);
-		} elseif (isset($payload['edited_message']['chat']['id'])) {
-			$chat_id = intval($payload['edited_message']['chat']['id']);
+		foreach (array('message', 'channel_post', 'edited_message') as $key) {
+			if (isset($payload[$key]['chat']['id'])) {
+				return intval($payload[$key]['chat']['id']);
+			}
 		}
 
-		return $chat_id;
+		return 0;
 	}
 
 	private function send_telegram_reply($telegram_token, $chat_id, $message)
 	{
 		$telegram_token = trim((string) $telegram_token);
-		$chat_id = intval($chat_id);
-		$message = trim((string) $message);
+		$chat_id        = intval($chat_id);
+		$message        = trim((string) $message);
 
 		if ($telegram_token === '' || $chat_id <= 0 || $message === '') {
 			return;
@@ -434,10 +798,7 @@ class TTCKPayment
 
 		wp_remote_post('https://api.telegram.org/bot' . $telegram_token . '/sendMessage', array(
 			'timeout' => 15,
-			'body' => array(
-				'chat_id' => $chat_id,
-				'text' => $message,
-			),
+			'body'    => array('chat_id' => $chat_id, 'text' => $message),
 		));
 	}
 
@@ -448,15 +809,14 @@ class TTCKPayment
 			return 0;
 		}
 
-		preg_match_all('/(?<!\\d)(\\d{1,3}(?:[\\.,\\s]\\d{3})+|\\d{4,12})(?!\\d)/u', $text, $matches);
+		preg_match_all('/(?<!\d)(\d{1,3}(?:[\.,\s]\d{3})+|\d{4,12})(?!\d)/u', $text, $matches);
 		if (empty($matches[1]) || !is_array($matches[1])) {
 			return 0;
 		}
 
 		$max_amount = 0;
 		foreach ($matches[1] as $raw) {
-			$normalized = preg_replace('/[^0-9]/', '', (string) $raw);
-			$amount = intval($normalized);
+			$amount = intval(preg_replace('/[^0-9]/', '', (string) $raw));
 			if ($amount > $max_amount) {
 				$max_amount = $amount;
 			}
@@ -464,646 +824,48 @@ class TTCKPayment
 
 		return $max_amount;
 	}
-	public function ttck_customer_confirm_transfer() {
-		if (empty($_POST['order_id'])) {
-			wp_send_json_error(['message' => 'Thiếu order_id']);
-		}
 
-		$order_id = absint($_POST['order_id']);
-		$order = wc_get_order($order_id);
-		if (!$order) {
-			wp_send_json_error(['message' => 'Không tìm thấy đơn hàng']);
-		}
+	/* ---------------------------------------------------------------------
+	 * Tiện ích admin
+	 * ------------------------------------------------------------------ */
 
-		// Chỉ cho đúng người mua xác nhận (hoặc user đang login là chủ đơn)
-		$user_id = get_current_user_id();
-		if ($user_id && (int)$order->get_user_id() !== $user_id) {
-			wp_send_json_error(['message' => 'Bạn không có quyền xác nhận đơn này']);
-		}
-
-		// Khách vãng lai (guest checkout) phải kèm order_key, nếu không bất kỳ ai
-		// cũng có thể quét order_id để ghi note + bắn mail cho admin.
-		if (!$user_id) {
-			$order_key = isset($_POST['order_key']) ? sanitize_text_field(wp_unslash($_POST['order_key'])) : '';
-			if ($order_key === '' || !hash_equals($order->get_order_key(), $order_key)) {
-				wp_send_json_error(['message' => 'Bạn không có quyền xác nhận đơn này']);
-			}
-		}
-
-		if ($order->has_status(['processing','completed'])) {
-			wp_send_json_error(['message' => 'Đơn đã thanh toán rồi']);
-		}
-		if ($order->has_status(['cancelled','refunded','failed'])) {
-			wp_send_json_error(['message' => 'Đơn không thể xác nhận ở trạng thái hiện tại']);
-		}
-
-		// Rate limit đơn giản theo order_id: 1 lần / 5 phút, tránh spam note + mail.
-		$ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
-		$rl_key = 'ttck_confirm_' . $order_id;
-		if (get_transient($rl_key)) {
-			wp_send_json_success(['message' => 'Đã ghi nhận yêu cầu của bạn, shop đang kiểm tra.']);
-		}
-		set_transient($rl_key, 1, 5 * MINUTE_IN_SECONDS);
-
-		// Dùng API của order (tương thích HPOS) thay cho update_post_meta().
-		$order->update_meta_data('_ttck_customer_confirmed', time());
-		$order->update_meta_data('_ttck_customer_confirmed_ip', $ip);
-
-		// Ghi note để admin nhìn thấy ngay
-		$order->add_order_note('Khách đã bấm "Tôi đã chuyển khoản" (yêu cầu shop kiểm tra thủ công).');
-		$order->save();
-
-		// (Tuỳ anh) gửi notify admin qua email
-		$admin_email = get_option('admin_email');
-		wp_mail(
-			$admin_email,
-			'TTCK: Khách báo đã chuyển khoản - Order #' . $order_id,
-			"Khách vừa xác nhận đã chuyển khoản.\nOrder: #{$order_id}\nTổng tiền: " . $order->get_total() . "\n"
-		);
-
-		wp_send_json_success(['message' => 'Đã gửi yêu cầu. Shop sẽ kiểm tra và xác nhận sớm.']);
-		}
-	//health check
-	public function auth_sync_status_ttck() {
-		wp_send_json(['oauth_status'=>!empty(self::oauth_get_settings()), 'timestamp'=> time()]);
-		die();
-	}
-
-	
-	public function fetch_order_status()
+	public function restore_masked_secrets()
 	{
-		if(empty($_REQUEST['order_id']) || !is_numeric($_REQUEST['order_id'])) {
-			echo 'wc-pending';die();
-		}
-		$order = wc_get_order(absint($_REQUEST['order_id']));
-		// wc_get_order() trả về false nếu đơn không tồn tại -> gọi get_data()
-		// sẽ fatal (PHP 8) và làm mọi lần poll trả về HTTP 500.
-		if (!$order) {
-			echo 'wc-pending';die();
-		}
-		echo 'wc-' . esc_html($order->get_status());
-		die();
-	}
-	public function add_order_statuses($order_statuses)
-	{
-		$new_order_statuses = array();
-		// add new order status after processing
-		foreach ($order_statuses as $key => $status) {
-			$new_order_statuses[$key] = $status;
-		}
-		$new_order_statuses['wc-paid'] = __('Paid', 'thanh-toan-chuyen-khoan');
-		$new_order_statuses['wc-underpaid'] = __('Underpaid', 'thanh-toan-chuyen-khoan');
-		return $new_order_statuses;
-	}
-	//Hàm này có thể giúp tạo ra một class Bank mới.
-	public function gen_payment_gateway($gatewayName)
-	{
-		$WC_Base_TTCK->thankyou_page();
-		
-		// $newClass = new class extends WC_Gateway_TTCK_Base
-		// {
-		// }; //create an anonymous class
-		// $newClassName = get_class($newClass); //get the name PHP assigns the anonymous class
-		// class_alias($newClassName, $gatewayName); //alias the anonymous class with your class name
-	}
-
-
-	public function main()
-	{
-
-		if (is_admin()) {
-			include(TTCK_DIR . 'inc/class-ttck-admin-page.php');
-			$this->Admin_Page = new TTCK_Admin_Page();
-		}
-		$settings = self::get_settings();
-		$this->settings = $settings;
-		//add_action('woocommerce_api_' . self::$webhook_oauth2, array($this, 'oauth2_handler'));
-		//add_action('woocommerce_api_' . self::$webhook_route, array($this, 'pc_payment_handler'));
-
-		if ('yes' == $settings['bank_transfer']['enabled'] ) {
-			// chỗ này e tách ra ngoài code cho clean mà nó k nhận (gộp woocommerce_payment_gateways)
-			
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-acb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-mbbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-techcombank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-timoplus.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vpbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vietinbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-ocb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-tpbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vietcombank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-bidv.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-agribank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-lienviet.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-hdbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-msb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-sacombank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-shb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vib.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-scb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-abbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-bacabank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-eximbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-namabank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-ncb.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-seabank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vietcapitalbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-cake.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-tnex.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-cimbbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-dongabank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-hsbc.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-baovietbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-oceanbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vietabank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vietbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-saigonbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-kienlongbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-pvcombank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-pulicbank.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vrbank.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-moca.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-shopeepay.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-smartpay.php');			
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vinid.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-vnpay.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-zalopay.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-momo.php');
-			require_once(TTCK_DIR . 'inc/banks/class-ttck-viettelpay.php');
-
-			#require_once(TTCK_DIR . 'inc/banks/class-ttck-vnptpay.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-mobifonepay.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-vtcpay.php');
-			//require_once(TTCK_DIR . 'inc/banks/class-ttck-vimo.php');
-
-			/*foreach ($settings['bank_transfer_accounts'] as $account) {
-				//$bank_name = explode('-',$account);
-				//if (isset($account['is_show']) && $account['is_show'] == 'yes') {
-					if (strtolower($account['bank_name']) == 'momo')
-						
-					if (strtolower($account['bank_name']) == 'acb')
-						
-					if (strtolower($account['bank_name']) == 'mbbank')
-						
-					if (strtolower($account['bank_name']) == 'techcombank')
-						
-					if (strtolower($account['bank_name']) == 'timoplus')
-						
-					if (strtolower($account['bank_name']) == 'vpbank')
-						
-					if (strtolower($account['bank_name']) == 'vietinbank')
-						
-					if (strtolower($account['bank_name']) == 'ocb')
-						
-					if (strtolower($account['bank_name']) == 'tpbank')
-						
-					if (strtolower($account['bank_name']) == 'vietcombank')
-						
-					if (strtolower($account['bank_name']) == 'bidv')
-						
-					if (strtolower($account['bank_name']) == 'agribank')
-						
-				//}
-			}*/
-			add_filter('woocommerce_payment_gateways', function ($gateways) {
-				$settings = self::get_settings();
-				#$gateways[] = 'WC_Gateway_TTCK_Phone';
-				$gateways[] = 'WC_Gateway_TTCK_ACB';
-				$gateways[] = 'WC_Gateway_TTCK_Mbbank';
-				$gateways[] = 'WC_Gateway_TTCK_Techcombank';
-				$gateways[] = 'WC_Gateway_TTCK_TimoPlus';
-				$gateways[] = 'WC_Gateway_TTCK_Vpbank';
-				$gateways[] = 'WC_Gateway_TTCK_Vietinbank';
-				$gateways[] = 'WC_Gateway_TTCK_OCB';
-				$gateways[] = 'WC_Gateway_TTCK_TPbank';
-				$gateways[] = 'WC_Gateway_TTCK_Vietcombank';
-				$gateways[] = 'WC_Gateway_TTCK_BIDV';
-				$gateways[] = 'WC_Gateway_TTCK_Agribank';
-				$gateways[] = 'WC_Gateway_TTCK_Lienviet';
-				$gateways[] = 'WC_Gateway_TTCK_Hdbank';				
-				$gateways[] = 'WC_Gateway_TTCK_MSB';
-				$gateways[] = 'WC_Gateway_TTCK_Sacombank';
-				$gateways[] = 'WC_Gateway_TTCK_SHB';
-				$gateways[] = 'WC_Gateway_TTCK_SCB';
-				$gateways[] = 'WC_Gateway_TTCK_ABBank';
-				$gateways[] = 'WC_Gateway_TTCK_BacABank';
-				$gateways[] = 'WC_Gateway_TTCK_Eximbank';
-				$gateways[] = 'WC_Gateway_TTCK_NamABank';
-				$gateways[] = 'WC_Gateway_TTCK_NCB';
-				$gateways[] = 'WC_Gateway_TTCK_SeABank';
-				$gateways[] = 'WC_Gateway_TTCK_VietCapitalBank';
-				$gateways[] = 'WC_Gateway_TTCK_Cake';
-				$gateways[] = 'WC_Gateway_TTCK_Tnex';
-				$gateways[] = 'WC_Gateway_TTCK_CIMBBank';
-				$gateways[] = 'WC_Gateway_TTCK_DongABank';
-				$gateways[] = 'WC_Gateway_TTCK_HSBC';
-				$gateways[] = 'WC_Gateway_TTCK_BaovietBank';
-				$gateways[] = 'WC_Gateway_TTCK_OceanBank';
-				$gateways[] = 'WC_Gateway_TTCK_VietABank';
-				$gateways[] = 'WC_Gateway_TTCK_VietBank';
-				$gateways[] = 'WC_Gateway_TTCK_SaigonBank';
-				$gateways[] = 'WC_Gateway_TTCK_Kienlongbank';
-				$gateways[] = 'WC_Gateway_TTCK_PVcomBank';
-				$gateways[] = 'WC_Gateway_TTCK_PulicBank';
-				$gateways[] = 'WC_Gateway_TTCK_VRBank';
-				
-				$gateways[] = 'WC_Gateway_TTCK_ViettelPay';
-				//$gateways[] = 'WC_Gateway_TTCK_Moca';
-				$gateways[] = 'WC_Gateway_TTCK_Momo';
-				//$gateways[] = 'WC_Gateway_QHpay_Shopeepay';
-				//$gateways[] = 'WC_Gateway_QHpay_Smartpay';
-				$gateways[] = 'WC_Gateway_TTCK_VIB';
-				$gateways[] = 'WC_Gateway_TTCK_Vinid';
-				$gateways[] = 'WC_Gateway_TTCK_Vnpay';
-				//$gateways[] = 'WC_Gateway_QHpay_Zalopay';
-
-				#$gateways[] = 'WC_Gateway_QHpay_VNPTPay';
-				//$gateways[] = 'WC_Gateway_QHpay_MobiFonePay';
-				//$gateways[] = 'WC_Gateway_QHpay_Vtcpay';
-				//$gateways[] = 'WC_Gateway_QHpay_Vimo';
-				
-
-				/*foreach ($settings['bank_transfer_accounts'] as $account) {
-					#if (strtolower($account['bank_name']) == 'momo')
-						
-					#if (strtolower($account['bank_name']) == 'acb')
-						
-					#if (strtolower($account['bank_name']) == 'mbbank')
-						
-					#if (strtolower($account['bank_name']) == 'techcombank')
-						
-					#if (strtolower($account['bank_name']) == 'timoplus')
-						
-					#if (strtolower($account['bank_name']) == 'vpbank')
-						
-					#if (strtolower($account['bank_name']) == 'vietinbank')
-						
-					#if (strtolower($account['bank_name']) == 'ocb')
-						
-					#if (strtolower($account['bank_name']) == 'tpbank')
-						
-					#if (strtolower($account['bank_name']) == 'vietcombank')
-						
-					#if (strtolower($account['bank_name']) == 'bidv')
-						
-					#if (strtolower($account['bank_name']) == 'agribank')
-						
-				}*/
-				// print_r ($gateways);
-				return $gateways;
-			});
-		}
-	}
-	public function notice_if_not_woocommerce()
-	{
-		$class = 'notice notice-warning';
-		$name = basename(__DIR__);
-		$message = $name.' '.__(
-			'not running because WooCommerce is not active. Please activate both plugins.',
-			'ttck'
-		);
-		printf('<div class="%1$s"><p><strong>%2$s</strong></p></div>', $class, $message);
-	}
-	static function get_settings()
-	{
-		$settings = get_option('ttck', self::$default_settings);
-		if (!is_array($settings)) $settings = array();
-		// wp_parse_args() chỉ merge cấp 1: các key con thiếu (extra_text,
-		// acceptable_difference, case_insensitive...) vẫn undefined và sinh
-		// warning "Undefined array key" trên mọi request. Merge đệ quy để tránh.
-		return self::merge_defaults($settings, self::$default_settings);
-	}
-	static function merge_defaults(array $settings, array $defaults)
-	{
-		foreach ($defaults as $key => $default_value) {
-			if (!array_key_exists($key, $settings)) {
-				$settings[$key] = $default_value;
-			} elseif (is_array($default_value) && is_array($settings[$key])) {
-				$settings[$key] = self::merge_defaults($settings[$key], $default_value);
-			}
-		}
-		return $settings;
-	}
-	static function update_settings(array $data) {
-		if(!empty($data)) update_option('ttck', $data);
-	}
-	static function oauth_get_settings()
-	{
-		$settings = get_option('ttck_oauth', self::$oauth_settings);
-		$settings = wp_parse_args($settings, self::$oauth_settings);
-		return $settings;
-	}
-	static function get_bank_icon($name, $img=false) {
-		//if(true || is_dir(TTCK_DIR.'/assets/'.$name.'.png')) return; 
-		$url = TTCK_URL.'/assets/'.strtolower($name).'.png';
-		return $img? '<img class="ttck-bank-icon" title="'.strtoupper($name).'" src="'.$url.'"/>': $url;
-	}
-	static function noQRBankLogo($name) {
-		return !in_array($name, ['momo','viettelpay']);
-	}
-	static function get_list_banks()
-	{
-		$banks = array(
-			'acb' => 'ACB',
-			'bidv' => 'BIDV',
-			'mbbank' => 'MB Bank',
-			'momo' => 'Momo',
-			'ocb' => 'OCB',
-			'timoplus' => 'Timo Plus',
-			'tpbank' => 'TPBank',
-			'vietcombank' => 'Vietcombank',
-			'vpbank' => 'VPBank',
-			'vietinbank' => 'Vietinbank',
-			'techcombank' => 'Techcombank',
-			'agribank' => 'Agribank',
-			'viettelpay'=> 'ViettelPay',
-			'hdbank'=> 'HDBank',
-			'moca'=> 'Moca',
-			'msb'=> 'MSB',
-			'sacombank'=> 'Sacombank',
-			'shb'=> 'SHB',
-			'shopeepay'=> 'ShopeePay',
-			'smartpay'=> 'SmartPay',
-			'vib'=> 'VIB',
-			'vinid'=> 'VinID',
-			'vnpay'=> 'VNPay',
-			'zalopay'=> 'ZaloPay',
-		);
-		return $banks;
-	}
-
-	static function get_list_bin()
-	{
-		$banks = array(
-			'970416' => 'acb',
-			'970418' => 'bidv',
-			'970422' => 'mbbank',
-			'970448' => 'ocb',
-			'970454' => 'timoplus',
-			'970423' => 'tpbank',
-			'970436' => 'vietcombank',
-			'970432' => 'vpbank',
-			'970415' => 'vietinbank',
-			'970407' => 'techcombank',
-			'970405' => 'agribank',
-			'970449' => 'lvp',
-			'970437'=> 'hdbank',
-			'970426'=> 'msb',
-			'970429'=> 'sacombank',
-			'970443'=> 'shb',
-			'970441'=> 'vib',
-			'970425' => 'abbank',
-			'970409' => 'bacabank',
-			'970438' => 'baovietbank',
-			'422589' => 'cimbbank',
-			'970406' => 'dongabank',
-			'970431' => 'eximbank',
-			'458761' => 'hsbc',
-			'970452' => 'kienlongbank',
-			'970422' => 'mbbank',
-			'970428' => 'namabank',
-			'970419' => 'ncb',
-			'970414' => 'oceanbank',
-			'970439' => 'pulicbank',
-			'970412' => 'pvcombank',
-			'970400' => 'saigonbank',
-			'970429' => 'scb',
-			'970440' => 'seabank',
-			'970423' => 'tpbank',
-			'970427' => 'vietabank',
-			'970433' => 'vietbank',
-			'970454' => 'vietcapitalbank',
-			'970421' => 'vrbank',
-		);
-		return $banks;
-	}
-	static function connect_status_banks()
-	{
-		$status = array(
-			'0' => __('Inactive', 'thanh-toan-chuyen-khoan'),
-			'1' =>  array(
-				'0' => __('Active', 'thanh-toan-chuyen-khoan'),
-				'1' => __('Trial', 'thanh-toan-chuyen-khoan'),
-				'2' => __('Out of money', 'thanh-toan-chuyen-khoan')
-			)
-		);
-		return $status;
-	}
-	static function transaction_text($code, $settings) {
-		if($settings==null) $settings = self::get_settings();
-		$texts = !empty($settings['bank_transfer']['extra_text'])? $settings['bank_transfer']['extra_text']: '';
-		if($texts) {
-			$texts = array_filter(explode("\n", $texts));
-			if(count($texts)) {
-				return $texts[array_rand($texts)].' '. $code;
-				//return (array_rand([1,0])==1)? $text. ' '. $code : $code.' '.$text;
-			}
-		}
-		return $code;
-	}
-
-	public function add_settings_link($links)
-	{
-		$settings = array('<a href="' . admin_url('admin.php?page=ttck') . '">' . __('Settings', 'thanh-toan-chuyen-khoan') . '</a>');
-		$links    = array_reverse(array_merge($links, $settings));
-
-		return $links;
-	}
-
-	//run by webhook
-	public function pc_payment_handler()
-	{
-		$txtBody = file_get_contents('php://input');
-		$jsonBody = json_decode($txtBody); //convert JSON into array
-		if (!$txtBody || !$jsonBody) {
-			wp_send_json(['error'=>"Missing body"]) ;
-			die();
-		}
-		if (isset($jsonBody->error) && $jsonBody->error != 0) {
-			wp_send_json(['error'=> "An error occurred"]);
-			die();
-		}
-		$header = ttck_getHeader();
-		$token = isset($header["Secure-Token"])? $header["Secure-Token"]: '';
-		// So sánh hằng thời gian, phân biệt hoa/thường (strcasecmp làm giảm
-		// một nửa entropy của token và lộ thông tin qua timing).
-		$expected_token = (string) $this->settings['bank_transfer']['secure_token'];
-		if ($expected_token === '' || !hash_equals($expected_token, (string) $token)) {
-			wp_send_json(['error'=> "Missing secure_token or wrong secure_token"]);
-			die();
-		}
-		$result = ['msg'=>[],'error'=>1,'rawInput'=> $txtBody];
-		$bankMsg = "";
-		$domain = parse_url(home_url(),PHP_URL_HOST);
-
-		if(!empty($jsonBody->data))
-		foreach ($jsonBody->data as $key => $transaction) {
-			$result['_ok']=1;	//detect webhook ok
-			$des = $transaction->description;
-			if(ttck_is_JSON($des)) {
-				$desJson = is_string($des)? json_decode($des, true): $des;
-				if(is_array($desJson)) {
-					if(isset($desJson['code'])) {
-						$des = $desJson['code'];
-						//$update['bank_transfer']['code'] = $desJson['code'];
-					}
-					//if(isset($desJson['app'])) $update['bank_transfer']['app'] = $desJson['app'];
-				}
-			}
-			//message for telegram: Amount: %s\nDesc: %s\nDate: %s
-			$bankMsg = sprintf("Thông báo giao dịch:\nTrang web: %s\nSố tiền: %s\nMã: %s\nTin nhắn: %s",
-					$domain,
-					number_format($transaction->amount),
-					ttck_parse_code($des,$this->settings['bank_transfer']['transaction_prefix'], $this->settings['bank_transfer']['case_insensitive']), 
-					$transaction->description//$transaction->when
-				);
-			$order_id = ttck_parse_order_id($des, $this->settings['bank_transfer']['transaction_prefix'], $this->settings['bank_transfer']['case_insensitive']);
-			if (is_null($order_id)) {
-				wp_send_json (['error'=>"Order ID not found from transaction content: " . $des . "\n"]);
-				continue;
-			}
-			//echo ("Start processing orders with transaction code " . $order_id . "...\n");
-			$order = wc_get_order($order_id);
-			if (!$order) {
-				continue;
-			}
-
-			$current_status = $order->get_status();
-			if ($current_status === 'cancelled') {
-				$result['error'] = 1;
-				$result['msg'][] = "Order $order_id has been cancelled. Payment ignored.";
-				continue;
-			}
-			if($order->get_status()=='completed') {
-				$result['error']=0;
-				$result['msg'][]= ("Transaction processed before " . $order_id . " success\n");
-				break;
-			}
-			//echo(var_dump(wc_get_order_statuses()));
-			$money = $order->get_total();
-			$paid = $transaction->amount;
-			/*$today = date_create(date("Y-m-d"));
-			$date_transaction = date_create($transaction->when);
-			$interval = date_diff($today, $date_transaction);
-			if ($interval->format('%R%a') < -2) {
-				# code...Giao dịch quá cũ, không xử lý
-				wp_send_json (['error'=>__('Transaction is too old, not processed', 'thanh-toan-chuyen-khoan')]);
-				die();
-			}*/
-			$total = number_format($transaction->amount, 0);
-			$order_note = "QH Testpay thông báo nhận <b>{$total}</b> VND, nội dung <B>{$des}</B> chuyển vào <b>STK {$transaction->subAccId}</b>";
-			$order->add_order_note($order_note);
-			$order->update_meta_data('ttck_ndck', $des);
-
-			// $order_note_overpay = " thông báo <b>{$total}</b> VND, nội dung <b>$des</b> chuyển khoản dư vào <b>STK {$transaction->subAccId}</b>";
-			$acceptable_difference = abs($this->settings['bank_transfer']['acceptable_difference']);
-			if ($paid < ($money  - $acceptable_difference>0? $money  - $acceptable_difference: $money )) {
-				$order->add_order_note(__('The order is underpaid so it is not completed', 'thanh-toan-chuyen-khoan'));
-				$status_after_underpaid = $this->settings['order_status']['order_status_after_underpaid'];
-
-				if ($status_after_underpaid && $status_after_underpaid != "wc-default") {
-					$status = substr($this->settings['order_status']['order_status_after_underpaid'], 3);
-					$order->update_status($status);
-				}
-				$result['error']=1;
-				$result['msg'][] = __('The order is underpaid so it is not completed', 'thanh-toan-chuyen-khoan');
-
-			} else {
-				$order->payment_complete();
-				wc_reduce_stock_levels($order_id);
-				$status_after_paid = $this->settings['order_status']['order_status_after_paid'];
-
-				if ($status_after_paid && $status_after_paid != "wc-default") {
-					$order->update_status($status_after_paid);
-				}
-				//NEU THANH TOAN DU THI GHI THEM 1 cai NOTE 
-				if ($paid > $money + $acceptable_difference) {
-					$order->add_order_note(__('Order has been overpaid', 'thanh-toan-chuyen-khoan'));
-					$result['msg'][] = __('Order has been overpaid', 'thanh-toan-chuyen-khoan');
-				}
-				$result['error']=0;
-				$result['msg'][]= ("Transaction processing  " . $order_id . " success\n");
-			}
-			
-			//$result['success']=1;
-			$order->save();
-			if(empty($result['error'])) break;
-		}
-		//telegram bot
-		if(!empty($this->settings['telegram_token']) && !empty($this->settings['telegram_chatid'])) {
-			$token = trim($this->settings['telegram_token']);
-			$chatid = trim($this->settings['telegram_chatid']);
-			$text = substr($bankMsg,0,4000);//$jsonBody->data? json_encode($jsonBody->data):'[]';
-			if(substr( $token, 0, 3 ) != "bot") $token='bot'.$token;
-			$response = wp_remote_get( "https://api.telegram.org/{$token}/sendMessage?chat_id={$chatid}&text=".urlencode($text), array(
-			    'timeout'     => 120,
-			    'httpversion' => '1.1',
-			    'headers' => array(
-			      )
-			));
-			#$result['msg'][] = wp_remote_retrieve_body( $response );
-		}
-		//other webhook
-		if(!empty($this->settings['webhook']) && filter_var($this->settings['webhook'], FILTER_VALIDATE_URL)) {
-			$resp = wp_remote_post ($this->settings['webhook'], [
-				'method' => 'POST',
-				'timeout' => 45,
-				'redirection' => 5,
-				'httpversion' => '1.0',
-				'blocking' => false,//true
-				'headers' => array('Content-Type: application/json'),
-				'sslverify' => false,
-				'body'=> $txtBody,//json_decode($txtBody,true)
-			]);
-			if ( is_wp_error( $resp ) ) $result['msg'][] = $resp->get_error_message();
-		}
-		//end
-		if (class_exists('WPC_PendingEmail') && method_exists('WPC_PendingEmail', 'wp_kpoint')) {
-			WPC_PendingEmail::wp_kpoint($result['msg'], '', 'send_doctor_admin', time());
-		}
-        
-		$result['msg'] = join(". ", $result['msg']);
-
-		wp_send_json($result);
-		die();
-		//TODO: Nghiên cứu việc gửi mail thông báo đơn hàng thanh toán hoàn tất.
-	}
-
-	public function restore_masked_secrets() {
 		if (!is_admin() || empty($_POST['settings'])) {
 			return;
 		}
 
-		$settings = isset($_POST['settings']) ? wp_unslash($_POST['settings']) : array();
-		$stored = self::get_settings();
+		$settings = wp_unslash($_POST['settings']);
+		$stored   = self::get_settings();
 
-		// Keep existing secret when admin chose not to change it.
 		// $_POST vẫn ở dạng slashed nên phải wp_slash() lại giá trị đọc từ DB.
-		if (isset($settings['telegram_webhook_secret']) && $settings['telegram_webhook_secret'] === '***UNCHANGED***') {
-			$_POST['settings']['telegram_webhook_secret'] = wp_slash(isset($stored['telegram_webhook_secret']) ? $stored['telegram_webhook_secret'] : '');
-		}
-
-		if (isset($settings['tgs_hmac_secret']) && $settings['tgs_hmac_secret'] === '***UNCHANGED***') {
-			$_POST['settings']['tgs_hmac_secret'] = wp_slash(isset($stored['tgs_hmac_secret']) ? $stored['tgs_hmac_secret'] : '');
+		foreach (array('telegram_webhook_secret', 'tgs_hmac_secret') as $field) {
+			if (isset($settings[$field]) && $settings[$field] === '***UNCHANGED***') {
+				$_POST['settings'][$field] = wp_slash(isset($stored[$field]) ? $stored[$field] : '');
+			}
 		}
 	}
 
-	public function maybe_activation_redirect() {
+	public function maybe_activation_redirect()
+	{
 		if (!get_transient('ttck_activation_redirect')) {
 			return;
 		}
+
 		delete_transient('ttck_activation_redirect');
+
 		if (is_network_admin() || isset($_GET['activate-multi']) || !current_user_can('manage_options')) {
 			return;
 		}
+
 		wp_safe_redirect(admin_url('admin.php?page=ttck'));
 		exit;
 	}
 
 	function load_plugin_textdomain()
 	{
-		load_plugin_textdomain($this->domain, false, dirname(plugin_basename(__FILE__))  . '/languages');
+		load_plugin_textdomain($this->domain, false, dirname(plugin_basename(__FILE__)) . '/languages');
 	}
 }
-new TTCKPayment();
 
+new TTCKPayment();
