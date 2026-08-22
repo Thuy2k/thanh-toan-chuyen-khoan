@@ -50,40 +50,54 @@ class TTCK_API
 	/**
 	 * Danh sách tài khoản nhận tiền đang bật.
 	 *
+	 * ── LẤY TỪ FILE JSON, KHÔNG LẤY TỪ DB ───────────────────────────────
+	 *
+	 * Đây là cửa DUY NHẤT mà tài khoản nhận tiền đi qua: create_payment()
+	 * gọi get_bank(), get_bank() gọi hàm này, và tgs_pos cũng chỉ gọi qua
+	 * đây. Nên chốt ở đúng chỗ này là chốt được cả đường tiền.
+	 *
+	 * Trước đây đọc option `ttck` của từng site — ai sửa được DB là đổi
+	 * được tài khoản khách quét. Nay đọc file JSON đã chốt, file thì khoá
+	 * cứng ở tầng hệ điều hành. Sửa DB vẫn sửa được, nhưng không đổi được
+	 * đồng nào chảy đi đâu, và màn "Xuất cấu hình" chỉ mặt ngay chỗ lệch.
+	 *
+	 * Không có file thì trả về RỖNG chứ không rơi về DB: rơi về DB là mở
+	 * lại đúng cái cửa vừa đóng. Thà không quét được QR còn hơn quét vào
+	 * tài khoản người khác.
+	 *
 	 * @return array Mỗi phần tử: id, bank_id, title, name, icon, account_number,
 	 *               account_name, bin, supports_qr.
 	 */
 	public static function get_banks($only_enabled = true)
 	{
-		$settings = TTCKPayment::get_settings();
-		$accounts = isset($settings['bank_transfer_accounts']) && is_array($settings['bank_transfer_accounts'])
-			? $settings['bank_transfer_accounts']
-			: array();
-		$meta = isset($settings['bank_meta']) && is_array($settings['bank_meta']) ? $settings['bank_meta'] : array();
+		$accounts = TTCK_Account_File::accounts_for_blog();
+
+		if (empty($accounts)) {
+			self::log_missing_accounts();
+			return array();
+		}
 
 		$out = array();
 
-		foreach ($accounts as $bank_id => $rows) {
+		foreach ($accounts as $bank_id => $account) {
 			$bank_id = strtolower((string) $bank_id);
-			if (!is_array($rows) || empty($rows)) {
+			if (!is_array($account) || trim((string) ($account['account_number'] ?? '')) === '') {
 				continue;
 			}
 
-			$bank_meta = isset($meta[$bank_id]) && is_array($meta[$bank_id]) ? $meta[$bank_id] : array();
-			$enabled   = isset($bank_meta['enabled']) ? ('yes' === $bank_meta['enabled']) : false;
+			$enabled = !empty($account['enabled']);
 
 			if ($only_enabled && !$enabled) {
 				continue;
 			}
 
-			$bank    = TTCK_Banks::get($bank_id);
-			$account = self::first_account($rows);
-			if (!$account) {
+			$bank = TTCK_Banks::get($bank_id);
+			if (!$bank) {
 				continue;
 			}
 
-			$title = isset($bank_meta['title']) && $bank_meta['title'] !== ''
-				? $bank_meta['title']
+			$title = isset($account['title']) && $account['title'] !== ''
+				? $account['title']
 				: sprintf(__('Quét Mã %s', 'thanh-toan-chuyen-khoan'), $bank['label']);
 
 			$out[] = array(
@@ -93,10 +107,10 @@ class TTCK_API
 				'name'           => $bank['label'],
 				'icon'           => TTCK_Banks::icon_url($bank_id),
 				'bin'            => $bank['bin'],
-				'account_number' => (string) $account['account_number'],
-				'account_name'   => (string) $account['account_name'],
+				'account_number' => trim((string) $account['account_number']),
+				'account_name'   => trim((string) ($account['account_name'] ?? '')),
 				'enabled'        => $enabled,
-				'sort'           => isset($bank_meta['sort']) ? (int) $bank_meta['sort'] : 0,
+				'sort'           => (int) ($account['sort'] ?? 0),
 				'supports_qr'    => ($bank['bin'] !== '' || in_array($bank['qr'], array('momo', 'viettelpay'), true)),
 			);
 		}
@@ -320,23 +334,30 @@ class TTCK_API
 		return $payment;
 	}
 
-	private static function first_account($rows)
+	/**
+	 * Ghi log khi shop không có tài khoản nào để cấp.
+	 *
+	 * Nhìn từ màn bán hàng thì "shop chưa cấu hình" và "file cấu hình đang
+	 * mất" giống hệt nhau, mà cách xử lý thì khác hẳn. Nên ghi rõ lý do ra
+	 * log, kèm blog_id để tra đúng shop.
+	 *
+	 * Mỗi request chỉ ghi một lần: get_banks() bị gọi nhiều lần trong một
+	 * lần dựng trang, ghi hết thì log ngập.
+	 */
+	private static function log_missing_accounts()
 	{
-		foreach ($rows as $row) {
-			if (!is_array($row)) {
-				continue;
-			}
-			$number = trim((string) ($row['account_number'] ?? ''));
-			if ($number === '') {
-				continue;
-			}
+		static $logged = array();
 
-			return array(
-				'account_number' => $number,
-				'account_name'   => (string) ($row['account_name'] ?? ''),
-			);
+		$blog_id = get_current_blog_id();
+		if (isset($logged[$blog_id])) {
+			return;
 		}
+		$logged[$blog_id] = true;
 
-		return null;
+		error_log(sprintf(
+			'[TTCK] Shop blog_id=%d không có tài khoản nhận tiền: %s',
+			$blog_id,
+			TTCK_Account_File::why_empty($blog_id)
+		));
 	}
 }

@@ -23,6 +23,8 @@ define('TTCK_TEST', 0);
 require_once TTCK_DIR . 'inc/functions.php';
 require_once TTCK_DIR . 'inc/class-ttck-banks.php';
 require_once TTCK_DIR . 'inc/class-ttck-payments.php';
+// Nạp TRƯỚC class-ttck-api.php: từ nay API lấy tài khoản nhận tiền từ file này
+require_once TTCK_DIR . 'inc/class-ttck-account-file.php';
 require_once TTCK_DIR . 'inc/class-ttck-api.php';
 
 class TTCKPayment

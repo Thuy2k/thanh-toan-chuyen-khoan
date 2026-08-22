@@ -33,6 +33,10 @@ class TTCK_Admin_Page
 			$this->save_banks();
 		} elseif ('ttck_reset_token' === $action) {
 			$this->reset_secure_token();
+		} elseif ('ttck_export_accounts' === $action) {
+			$this->export_accounts();
+		} elseif ('ttck_download_accounts' === $action) {
+			$this->download_accounts();
 		}
 
 		add_action('admin_menu', array($this, 'register_menu'));
@@ -76,6 +80,39 @@ class TTCK_Admin_Page
 			'ttck-transactions',
 			array($this, 'render_page')
 		);
+
+		add_submenu_page(
+			self::MENU_SLUG,
+			__('Xuất cấu hình', 'thanh-toan-chuyen-khoan'),
+			__('Xuất cấu hình', 'thanh-toan-chuyen-khoan'),
+			self::export_capability(),
+			'ttck-export',
+			array($this, 'render_page')
+		);
+	}
+
+	/**
+	 * Quyền cần có để vào màn "Xuất cấu hình".
+	 *
+	 * Cố ý HẸP HƠN quyền vào các tab khác, vì hai lẽ:
+	 *
+	 *   1. Xuất file là hành động CHỐT tài khoản nhận tiền của cả 650 shop.
+	 *      Nếu admin từng shop cũng xuất được thì kịch bản tấn công rút còn
+	 *      hai bước — sửa DB rồi bấm Xuất — và file lại khớp DB, mất sạch khả
+	 *      năng phát hiện.
+	 *   2. Bảng đối chiếu hiện tài khoản của MỌI shop. Admin một shop không có
+	 *      việc gì phải nhìn thấy tài khoản của 649 shop còn lại.
+	 *
+	 * Site đơn (không multisite) thì manage_options đã là quyền cao nhất.
+	 */
+	private static function export_capability()
+	{
+		return is_multisite() ? 'manage_network_options' : 'manage_options';
+	}
+
+	private function can_export()
+	{
+		return current_user_can(self::export_capability());
 	}
 
 	/* ---------------------------------------------------------------------
@@ -200,7 +237,80 @@ class TTCK_Admin_Page
 
 		TTCKPayment::update_settings($settings);
 		$this->settings = TTCKPayment::get_settings();
-		$this->saved_message();
+
+		/*
+		 * Lưu DB xong KHÔNG có nghĩa là đã đổi được tài khoản khách quét.
+		 * Lúc sinh QR hệ thống đọc file JSON đã chốt, không đọc DB. Nói thẳng
+		 * ra đây, không thì người cấu hình tưởng xong việc rồi bỏ đi.
+		 */
+		$this->message = '<div class="notice notice-warning"><p><strong>'
+			. esc_html__('Đã lưu vào cơ sở dữ liệu.', 'thanh-toan-chuyen-khoan')
+			. '</strong> '
+			. esc_html__('Cấu hình này CHƯA có hiệu lực: mã QR vẫn cấp theo file cấu hình đã chốt. Vào tab "Xuất cấu hình" để chốt lại.', 'thanh-toan-chuyen-khoan')
+			. '</p></div>';
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Xuất file tài khoản
+	 * ------------------------------------------------------------------ */
+
+	/** Ghi file JSON đè lên bản cũ */
+	private function export_accounts()
+	{
+		if (!$this->verify('ttck_export_accounts') || !$this->can_export()) {
+			$this->error_message();
+			return;
+		}
+
+		$result = TTCK_Account_File::export();
+
+		if (is_wp_error($result)) {
+			$this->message = '<div class="notice notice-error"><p><strong>'
+				. esc_html__('Không xuất được file:', 'thanh-toan-chuyen-khoan') . '</strong> '
+				. esc_html($result->get_error_message())
+				. '</p></div>';
+			return;
+		}
+
+		$this->message = '<div class="notice notice-success"><p><strong>'
+			. esc_html(sprintf(
+				/* translators: 1: số shop, 2: số tài khoản, 3: dung lượng */
+				__('Đã chốt cấu hình: %1$d shop, %2$d tài khoản (%3$s).', 'thanh-toan-chuyen-khoan'),
+				$result['shop_count'],
+				$result['account_count'],
+				size_format($result['bytes'])
+			))
+			. '</strong> '
+			. esc_html__('Nhớ khoá lại file ở server.', 'thanh-toan-chuyen-khoan')
+			. '</p></div>';
+	}
+
+	/**
+	 * Tải JSON về máy mà KHÔNG ghi đè file đang chạy.
+	 *
+	 * Cần cho hai việc: xem trước cấu hình sắp chốt, và lấy bản sao lưu khi
+	 * file trên server đang khoá cứng không ghi được.
+	 */
+	private function download_accounts()
+	{
+		if (!$this->verify('ttck_export_accounts') || !$this->can_export()) {
+			$this->error_message();
+			return;
+		}
+
+		$json = TTCK_Account_File::build_json();
+		if ($json === false) {
+			$this->error_message();
+			return;
+		}
+
+		nocache_headers();
+		header('Content-Type: application/json; charset=utf-8');
+		header('Content-Disposition: attachment; filename="bank-accounts-' . gmdate('Ymd-His') . '.json"');
+		header('Content-Length: ' . strlen($json));
+
+		echo $json; // phpcs:ignore WordPress.Security.EscapeOutput -- tải file JSON thô
+		exit;
 	}
 
 	public function reset_secure_token()
@@ -249,6 +359,9 @@ class TTCK_Admin_Page
 			case 'ttck-transactions':
 				$this->render_transactions_tab();
 				break;
+			case 'ttck-export':
+				$this->render_export_tab();
+				break;
 			default:
 				$this->render_settings_tab();
 				break;
@@ -266,6 +379,11 @@ class TTCK_Admin_Page
 			'ttck-banks'        => __('Tài khoản ngân hàng', 'thanh-toan-chuyen-khoan'),
 			'ttck-transactions' => __('Giao dịch', 'thanh-toan-chuyen-khoan'),
 		);
+
+		// Tab chốt cấu hình chỉ hiện cho người được phép — xem export_capability()
+		if ($this->can_export()) {
+			$tabs['ttck-export'] = __('Xuất cấu hình', 'thanh-toan-chuyen-khoan');
+		}
 
 		echo '<h2 class="nav-tab-wrapper">';
 		foreach ($tabs as $slug => $label) {
@@ -701,5 +819,321 @@ class TTCK_Admin_Page
 			)));
 			echo '</div></div>';
 		}
+	}
+
+	/* ------------------------------ Tab 4 ----------------------------- */
+
+	/**
+	 * Màn CHỐT CẤU HÌNH.
+	 *
+	 * Ba việc trên cùng một màn, cố ý để cạnh nhau:
+	 *   1. Xem file đang chốt là bản nào, ai chốt, lúc nào.
+	 *   2. Chốt lại (xuất file) khi cấu hình đã sửa xong.
+	 *   3. Đối chiếu DB với file — chỗ này mới là chỗ phát hiện bất thường.
+	 */
+	private function render_export_tab()
+	{
+		/*
+		 * Chặn lại ở đây chứ không chỉ giấu tab: bảng đối chiếu bên dưới hiện
+		 * tài khoản của MỌI shop, mà gõ thẳng ?page=ttck-export thì bỏ qua menu.
+		 */
+		if (!$this->can_export()) {
+			echo '<div class="notice notice-error"><p>'
+				. esc_html__('Chỉ quản trị viên toàn mạng mới xem được màn chốt cấu hình.', 'thanh-toan-chuyen-khoan')
+				. '</p></div>';
+			return;
+		}
+
+		$status = TTCK_Account_File::status();
+		$can    = true;
+		?>
+		<p class="description">
+			<?php esc_html_e('Mã QR cấp tài khoản theo FILE dưới đây, không theo cơ sở dữ liệu. Sửa cấu hình xong phải chốt lại thì mới có hiệu lực.', 'thanh-toan-chuyen-khoan'); ?>
+		</p>
+
+		<h2><?php esc_html_e('File đang chốt', 'thanh-toan-chuyen-khoan'); ?></h2>
+		<table class="widefat striped" style="max-width:900px;">
+			<tbody>
+				<tr>
+					<td style="width:220px;"><strong><?php esc_html_e('Đường dẫn', 'thanh-toan-chuyen-khoan'); ?></strong></td>
+					<td><code><?php echo esc_html($status['path']); ?></code></td>
+				</tr>
+				<tr>
+					<td><strong><?php esc_html_e('Tình trạng', 'thanh-toan-chuyen-khoan'); ?></strong></td>
+					<td>
+						<?php if (!$status['exists']) : ?>
+							<span style="color:#b32d2e;font-weight:600;"><?php esc_html_e('CHƯA CÓ FILE — mọi shop đều không quét QR được', 'thanh-toan-chuyen-khoan'); ?></span>
+						<?php elseif (!$status['valid']) : ?>
+							<span style="color:#b32d2e;font-weight:600;"><?php esc_html_e('FILE HỎNG — không đọc được JSON', 'thanh-toan-chuyen-khoan'); ?></span>
+						<?php else : ?>
+							<span style="color:#008a20;font-weight:600;"><?php esc_html_e('Đang dùng', 'thanh-toan-chuyen-khoan'); ?></span>
+							&middot; <?php echo esc_html(sprintf(__('%1$d shop, %2$d tài khoản', 'thanh-toan-chuyen-khoan'), $status['shop_count'], $status['account_count'])); ?>
+							&middot; <?php echo esc_html(size_format($status['size'])); ?>
+						<?php endif; ?>
+					</td>
+				</tr>
+				<?php if ($status['valid']) : ?>
+					<tr>
+						<td><strong><?php esc_html_e('Chốt lúc', 'thanh-toan-chuyen-khoan'); ?></strong></td>
+						<td>
+							<?php echo esc_html($status['generated_at']); ?>
+							<?php if ($status['generated_by'] !== '') : ?>
+								&middot; <?php echo esc_html($status['generated_by']); ?>
+							<?php endif; ?>
+							<span class="description">(<?php esc_html_e('sửa file lần cuối', 'thanh-toan-chuyen-khoan'); ?>: <?php echo esc_html($status['modified_at']); ?>)</span>
+						</td>
+					</tr>
+					<tr>
+						<td><strong><?php esc_html_e('Tổng kiểm', 'thanh-toan-chuyen-khoan'); ?></strong></td>
+						<td>
+							<code><?php echo esc_html(substr($status['checksum'], 0, 16)); ?>…</code>
+							<?php if ($status['checksum_ok']) : ?>
+								<span style="color:#008a20;">✓ <?php esc_html_e('khớp', 'thanh-toan-chuyen-khoan'); ?></span>
+							<?php else : ?>
+								<span style="color:#b32d2e;font-weight:600;">✗ <?php esc_html_e('KHÔNG KHỚP — nội dung file đã bị sửa tay', 'thanh-toan-chuyen-khoan'); ?></span>
+							<?php endif; ?>
+						</td>
+					</tr>
+				<?php endif; ?>
+				<tr>
+					<td><strong><?php esc_html_e('Khoá ghi', 'thanh-toan-chuyen-khoan'); ?></strong></td>
+					<td>
+						<?php if ($status['writable']) : ?>
+							<span style="color:#996800;font-weight:600;"><?php esc_html_e('CHƯA KHOÁ — file đang ghi được', 'thanh-toan-chuyen-khoan'); ?></span>
+							<p class="description" style="margin:4px 0 0;">
+								<?php esc_html_e('Chạy thật thì nên khoá lại ở server, để mã nguồn cũng không ghi đè được.', 'thanh-toan-chuyen-khoan'); ?>
+							</p>
+						<?php else : ?>
+							<span style="color:#008a20;font-weight:600;"><?php esc_html_e('Đã khoá — không ghi đè được', 'thanh-toan-chuyen-khoan'); ?></span>
+							<p class="description" style="margin:4px 0 0;">
+								<?php esc_html_e('Muốn chốt bản mới thì mở khoá ở server, bấm "Chốt cấu hình", rồi khoá lại.', 'thanh-toan-chuyen-khoan'); ?>
+							</p>
+						<?php endif; ?>
+					</td>
+				</tr>
+			</tbody>
+		</table>
+
+		<?php $this->render_exposure_check(); ?>
+
+		<h2><?php esc_html_e('Chốt cấu hình', 'thanh-toan-chuyen-khoan'); ?></h2>
+		<?php if (!$can) : ?>
+			<div class="notice notice-info inline"><p>
+				<?php esc_html_e('Chỉ quản trị viên toàn mạng mới chốt được cấu hình. Bạn vẫn xem và đối chiếu được ở dưới.', 'thanh-toan-chuyen-khoan'); ?>
+			</p></div>
+		<?php else : ?>
+			<form method="post" style="margin-bottom:20px;">
+				<input type="hidden" name="ttck_nonce" value="<?php echo esc_attr(wp_create_nonce('ttck_export_accounts')); ?>">
+				<button type="submit" name="action" value="ttck_export_accounts" class="button button-primary">
+					<?php esc_html_e('Chốt cấu hình (ghi đè file)', 'thanh-toan-chuyen-khoan'); ?>
+				</button>
+				<button type="submit" name="action" value="ttck_download_accounts" class="button">
+					<?php esc_html_e('Tải JSON về máy', 'thanh-toan-chuyen-khoan'); ?>
+				</button>
+				<p class="description">
+					<?php esc_html_e('"Chốt" đọc cấu hình của toàn bộ site trong mạng rồi ghi đè file. "Tải về" chỉ xem trước, không đụng vào file đang chạy.', 'thanh-toan-chuyen-khoan'); ?>
+				</p>
+			</form>
+		<?php endif; ?>
+
+		<?php $this->render_compare_table(); ?>
+		<?php
+	}
+
+	/**
+	 * File có tải được từ internet không.
+	 *
+	 * Thư mục có sẵn .htaccess, nhưng nginx không đọc .htaccess — nên phải
+	 * thử THẬT bằng một request vào chính URL đó thay vì tin là đã chặn.
+	 * Nhớ kết quả một giờ, kiểm tra lại thì bấm nút.
+	 */
+	private function render_exposure_check()
+	{
+		$key   = 'ttck_exposure_check';
+		$force = isset($_GET['ttck_recheck']);
+		$check = $force ? false : get_transient($key);
+
+		if ($check === false) {
+			$check = TTCK_Account_File::check_public_exposure();
+			set_transient($key, $check, HOUR_IN_SECONDS);
+		}
+
+		$recheck = esc_url(add_query_arg('ttck_recheck', time()));
+
+		echo '<p style="margin-top:12px;">';
+
+		if (empty($check['checked'])) {
+			echo '<span class="description">' . esc_html__('Chưa kiểm tra được khả năng lộ file:', 'thanh-toan-chuyen-khoan')
+				. ' ' . esc_html($check['reason'] ?? '') . '</span>';
+		} elseif (!empty($check['leaking'])) {
+			echo '<strong style="color:#b32d2e;">'
+				. esc_html__('CẢNH BÁO: ai cũng tải được file này từ internet.', 'thanh-toan-chuyen-khoan')
+				. '</strong> <code>' . esc_html($check['url']) . '</code> '
+				. esc_html__('trả về 200. Phải chặn trong cấu hình web server — xem docs/file-tai-khoan-json.md.', 'thanh-toan-chuyen-khoan');
+		} else {
+			echo '<span style="color:#008a20;font-weight:600;">'
+				. esc_html__('Không tải được từ internet', 'thanh-toan-chuyen-khoan') . '</span> '
+				. '<span class="description">(' . esc_html__('mã trả về', 'thanh-toan-chuyen-khoan') . ' '
+				. esc_html((string) ($check['code'] ?? '?')) . ')</span>';
+		}
+
+		echo ' <a href="' . $recheck . '">' . esc_html__('Kiểm tra lại', 'thanh-toan-chuyen-khoan') . '</a>';
+		echo '</p>';
+	}
+
+	/**
+	 * Bảng đối chiếu DB ↔ file.
+	 *
+	 * Đây mới là thứ trả lời câu "có ai đổi tài khoản không". File là thứ
+	 * đang cấp tài khoản nên DB lệch file KHÔNG mất tiền — nhưng nó nói cho
+	 * biết có người vừa động vào cấu hình mà chưa được chốt.
+	 */
+	private function render_compare_table()
+	{
+		$compare = TTCK_Account_File::compare();
+		$rows    = $compare['rows'];
+		$sum     = $compare['summary'];
+		$dups    = $compare['duplicates'];
+
+		$only_issues = !isset($_GET['ttck_all']);
+		?>
+		<h2><?php esc_html_e('Đối chiếu cơ sở dữ liệu với file', 'thanh-toan-chuyen-khoan'); ?></h2>
+
+		<p>
+			<?php echo esc_html(sprintf(__('%d site', 'thanh-toan-chuyen-khoan'), $sum['total'])); ?>
+			&middot; <span style="color:#008a20;"><?php echo esc_html(sprintf(__('%d khớp', 'thanh-toan-chuyen-khoan'), $sum['ok'])); ?></span>
+			&middot; <span style="color:<?php echo $sum['diff'] > 0 ? '#b32d2e' : '#666'; ?>;font-weight:<?php echo $sum['diff'] > 0 ? '700' : '400'; ?>;">
+				<?php echo esc_html(sprintf(__('%d LỆCH', 'thanh-toan-chuyen-khoan'), $sum['diff'])); ?>
+			</span>
+			&middot; <span style="color:<?php echo $sum['missing'] > 0 ? '#996800' : '#666'; ?>;">
+				<?php echo esc_html(sprintf(__('%d chưa chốt', 'thanh-toan-chuyen-khoan'), $sum['missing'])); ?>
+			</span>
+			&middot; <span class="description"><?php echo esc_html(sprintf(__('%d chưa cấu hình', 'thanh-toan-chuyen-khoan'), $sum['empty'])); ?></span>
+			<?php if ($sum['orphan'] > 0) : ?>
+				&middot; <span style="color:#996800;"><?php echo esc_html(sprintf(__('%d thừa trong file', 'thanh-toan-chuyen-khoan'), $sum['orphan'])); ?></span>
+			<?php endif; ?>
+		</p>
+
+		<?php if (!empty($dups)) : ?>
+			<div class="notice notice-error inline">
+				<p><strong><?php echo esc_html(sprintf(__('%d số tài khoản đang dùng chung cho nhiều shop', 'thanh-toan-chuyen-khoan'), count($dups))); ?></strong></p>
+				<p class="description" style="margin-top:0;">
+					<?php esc_html_e('Hầu như luôn là do nhân bản site để tạo shop mới: cấu hình đi theo bản sao, và tiền của shop mới chảy về tài khoản shop cũ.', 'thanh-toan-chuyen-khoan'); ?>
+				</p>
+				<ul style="margin:8px 0 12px 20px;list-style:disc;">
+					<?php foreach ($dups as $key => $shops) : ?>
+						<li>
+							<code><?php echo esc_html($key); ?></code> —
+							<?php
+							$names = array();
+							foreach ($shops as $shop) {
+								$names[] = ($shop['site_code'] !== '' ? $shop['site_code'] . ' ' : '')
+									. $shop['name'] . ' (blog ' . $shop['blog_id'] . ')';
+							}
+							echo esc_html(implode(' · ', $names));
+							?>
+						</li>
+					<?php endforeach; ?>
+				</ul>
+			</div>
+		<?php endif; ?>
+
+		<p>
+			<?php if ($only_issues) : ?>
+				<a href="<?php echo esc_url(add_query_arg('ttck_all', 1)); ?>"><?php esc_html_e('Hiện tất cả site', 'thanh-toan-chuyen-khoan'); ?></a>
+			<?php else : ?>
+				<a href="<?php echo esc_url(remove_query_arg('ttck_all')); ?>"><?php esc_html_e('Chỉ hiện site có vấn đề', 'thanh-toan-chuyen-khoan'); ?></a>
+			<?php endif; ?>
+		</p>
+
+		<table class="widefat striped">
+			<thead>
+				<tr>
+					<th style="width:70px;"><?php esc_html_e('Mã shop', 'thanh-toan-chuyen-khoan'); ?></th>
+					<th><?php esc_html_e('Site', 'thanh-toan-chuyen-khoan'); ?></th>
+					<th style="width:130px;"><?php esc_html_e('Trạng thái', 'thanh-toan-chuyen-khoan'); ?></th>
+					<th><?php esc_html_e('Đang cấp (file)', 'thanh-toan-chuyen-khoan'); ?></th>
+					<th><?php esc_html_e('Trong DB', 'thanh-toan-chuyen-khoan'); ?></th>
+				</tr>
+			</thead>
+			<tbody>
+				<?php
+				$shown = 0;
+				foreach ($rows as $row) :
+					if ($only_issues && in_array($row['state'], array('ok', 'empty'), true)) {
+						continue;
+					}
+					$shown++;
+					?>
+					<tr>
+						<td><strong><?php echo esc_html($row['site_code'] !== '' ? $row['site_code'] : '—'); ?></strong></td>
+						<td>
+							<?php echo esc_html($row['name']); ?>
+							<br><span class="description"><?php echo esc_html($row['domain']); ?> · blog <?php echo esc_html((string) $row['blog_id']); ?></span>
+						</td>
+						<td><?php echo wp_kses_post($this->state_badge($row['state'])); ?></td>
+						<td><?php echo wp_kses_post($this->accounts_cell($row['file'], $row['db'])); ?></td>
+						<td><?php echo wp_kses_post($this->accounts_cell($row['db'], $row['file'])); ?></td>
+					</tr>
+				<?php endforeach; ?>
+
+				<?php if ($shown === 0) : ?>
+					<tr><td colspan="5" style="padding:16px;">
+						<?php esc_html_e('Không có site nào lệch. Cấu hình đang chạy khớp hoàn toàn với file đã chốt.', 'thanh-toan-chuyen-khoan'); ?>
+					</td></tr>
+				<?php endif; ?>
+			</tbody>
+		</table>
+		<?php
+	}
+
+	/** Nhãn màu cho một trạng thái đối chiếu */
+	private function state_badge($state)
+	{
+		$map = array(
+			'ok'      => array('#008a20', __('Khớp', 'thanh-toan-chuyen-khoan')),
+			'diff'    => array('#b32d2e', __('LỆCH', 'thanh-toan-chuyen-khoan')),
+			'missing' => array('#996800', __('Chưa chốt', 'thanh-toan-chuyen-khoan')),
+			'empty'   => array('#666666', __('Chưa cấu hình', 'thanh-toan-chuyen-khoan')),
+			'orphan'  => array('#996800', __('Thừa trong file', 'thanh-toan-chuyen-khoan')),
+		);
+
+		list($color, $label) = $map[$state] ?? array('#666666', $state);
+
+		return '<span style="color:' . esc_attr($color) . ';font-weight:600;">' . esc_html($label) . '</span>';
+	}
+
+	/**
+	 * Một ô tài khoản, tô đỏ những dòng khác với bên kia.
+	 *
+	 * Đưa hai cột cạnh nhau mà không chỉ ra khác chỗ nào thì người đọc vẫn
+	 * phải dò từng chữ số — đúng lúc đang vội mới là lúc dò sót.
+	 */
+	private function accounts_cell(array $accounts, array $other)
+	{
+		if (empty($accounts)) {
+			return '<span class="description">—</span>';
+		}
+
+		$out = array();
+
+		foreach ($accounts as $bank_id => $acc) {
+			$number = trim((string) ($acc['account_number'] ?? ''));
+			$name   = trim((string) ($acc['account_name'] ?? ''));
+
+			$peer       = $other[$bank_id] ?? null;
+			$peer_num   = $peer ? trim((string) ($peer['account_number'] ?? '')) : null;
+			$is_diff    = ($peer_num === null || $peer_num !== $number);
+			$style      = $is_diff ? 'color:#b32d2e;font-weight:600;' : '';
+			$off_label  = empty($acc['enabled']) ? ' <span class="description">(tắt)</span>' : '';
+
+			$out[] = '<div style="' . esc_attr($style) . '">'
+				. esc_html(strtoupper((string) $bank_id)) . ' · <code>' . esc_html($number) . '</code>'
+				. ($name !== '' ? ' · ' . esc_html($name) : '')
+				. $off_label
+				. '</div>';
+		}
+
+		return implode('', $out);
 	}
 }
