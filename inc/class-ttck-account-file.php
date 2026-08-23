@@ -111,6 +111,16 @@ class TTCK_Account_File
 			return null;
 		}
 
+		/*
+		 * Cắt BOM UTF-8 nếu có.
+		 *
+		 * json_decode() coi ba byte EF BB BF ở đầu là rác và trả về null —
+		 * tức là CẢ 650 SHOP mất kênh chuyển khoản, chỉ vì ai đó mở file bằng
+		 * Notepad rồi bấm lưu. Cái giá của việc bỏ qua ba byte thừa nhỏ hơn
+		 * nhiều so với cái giá của việc dừng bán.
+		 */
+		$raw = preg_replace('/^\xEF\xBB\xBF/', '', $raw);
+
 		$data = json_decode($raw, true);
 		if (!is_array($data) || !isset($data['shops']) || !is_array($data['shops'])) {
 			self::$cache = false;

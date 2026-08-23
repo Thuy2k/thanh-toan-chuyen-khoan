@@ -304,10 +304,30 @@ class TTCK_Admin_Page
 			return;
 		}
 
+		/*
+		 * ── VỨT SẠCH MỌI THỨ ĐÃ TRÓT IN RA TRƯỚC ĐÓ ─────────────────────
+		 *
+		 * Đã dính đúng một lần: một plugin khác lưu file kèm BOM UTF-8, nên
+		 * PHP in ra 3 byte rác (EF BB BF) ở mọi request. Chúng lọt vào đầu
+		 * file tải về, và vì Content-Length khai theo strlen($json) nên
+		 * trình duyệt cắt mất đúng 3 byte CUỐI — file JSON thiếu hai dấu
+		 * ngoặc đóng, mở lên là lỗi cú pháp.
+		 *
+		 * Cái BOM đó đã gỡ, nhưng bất kỳ notice hay khoảng trắng nào của
+		 * plugin khác cũng gây lại y hệt. Nên dọn sạch bộ đệm ngay tại đây
+		 * thay vì tin rằng không ai in gì.
+		 *
+		 * Và bỏ luôn Content-Length: thiếu nó thì trình duyệt đọc tới hết
+		 * luồng, không có gì để cắt nhầm. File cấu hình vài KB, không cần
+		 * thanh tiến trình.
+		 */
+		while (ob_get_level() > 0) {
+			ob_end_clean();
+		}
+
 		nocache_headers();
 		header('Content-Type: application/json; charset=utf-8');
 		header('Content-Disposition: attachment; filename="bank-accounts-' . gmdate('Ymd-His') . '.json"');
-		header('Content-Length: ' . strlen($json));
 
 		echo $json; // phpcs:ignore WordPress.Security.EscapeOutput -- tải file JSON thô
 		exit;
