@@ -158,6 +158,26 @@ class TTCK_Account_File
 	}
 
 	/**
+	 * Tên shop (trường `name`) theo blog_id, đọc từ chính file JSON đã chốt.
+	 *
+	 * Dùng để dựng hậu tố nội dung chuyển khoản (TGS<tên shop>). Không có trong
+	 * file thì trả '' để bên gọi tự rơi về get_bloginfo('name').
+	 */
+	public static function shop_name_for_blog($blog_id = 0)
+	{
+		$blog_id = (int) ($blog_id ?: get_current_blog_id());
+		$data    = self::read();
+
+		if ($data === null) {
+			return '';
+		}
+
+		$shop = $data['shops'][(string) $blog_id] ?? null;
+
+		return is_array($shop) ? trim((string) ($shop['name'] ?? '')) : '';
+	}
+
+	/**
 	 * Vì sao shop này chưa có tài khoản — để ghi log cho ra hồn.
 	 *
 	 * "Chưa cấu hình tài khoản" và "file cấu hình đang mất" là hai chuyện khác

@@ -139,10 +139,44 @@ class TTCK_API
 	}
 
 	/**
+	 * Tên shop hiển thị trong nội dung chuyển khoản — đọc từ bank-accounts.json
+	 * (trường `name` theo blog_id), rơi về tên site nếu file chưa có shop này.
+	 */
+	public static function shop_display_name($blog_id = 0)
+	{
+		$name = '';
+		if (is_callable(array('TTCK_Account_File', 'shop_name_for_blog'))) {
+			$name = (string) TTCK_Account_File::shop_name_for_blog($blog_id);
+		}
+		if ($name === '') {
+			$name = (string) get_bloginfo('name');
+		}
+
+		return $name;
+	}
+
+	/**
+	 * Nội dung chuyển khoản cho QR động của POS:
+	 *
+	 *     TT QR cho CT TGS - <tên shop>
+	 *
+	 * KHÔNG kèm mã phiếu: nội dung ngắn để ngân hàng không cắt bớt (nhiều app
+	 * chỉ hiện/gửi được ~25 ký tự), và tên shop đứng ngay đầu để nhân viên
+	 * nhận diện được dù bị cắt. Đối soát khoản thu vẫn làm thủ công theo số
+	 * tiền + thời điểm (staff bấm "Đã thanh toán"), không dựa vào nội dung CK.
+	 *
+	 * Giữ tham số $bill_code để tương thích chữ ký cũ — không còn dùng.
+	 */
+	public static function build_transfer_content($bill_code = '', $blog_id = 0)
+	{
+		return 'TT QR cho CT TGS - ' . self::shop_display_name($blog_id);
+	}
+
+	/**
 	 * Tạo yêu cầu thanh toán + mã QR động.
 	 *
 	 * @param array $args bank_id (bắt buộc), amount (bắt buộc), source,
-	 *                    source_ref, payload, expires_in, note.
+	 *                    source_ref, payload, expires_in, bill_code, note.
 	 * @return array|WP_Error Bản ghi kèm qr_url / qr_type / gateway_info.
 	 */
 	public static function create_payment(array $args)
@@ -203,15 +237,95 @@ class TTCK_API
 			return null;
 		}
 
+		// Chuyển bản ghi treo đã quá hạn sang 'expired' ngay tại đây (POS poll
+		// qua hàm này), không chờ cron ngày.
+		TTCK_Payments::maybe_expire($payment);
+
+		$expiry = self::expiry_info($payment);
+
 		return array(
-			'id'          => $payment['id'],
-			'ref_code'    => $payment['ref_code'],
-			'status'      => $payment['status'],
-			'is_paid'     => $payment['is_paid'],
-			'amount'      => $payment['amount'],
-			'paid_amount' => $payment['paid_amount'],
-			'paid_at'     => $payment['paid_at'],
+			'id'            => $payment['id'],
+			'ref_code'      => $payment['ref_code'],
+			'bill_code'     => $payment['bill_code'] ?? '',
+			'status'        => $payment['status'],
+			'is_paid'       => $payment['is_paid'],
+			'is_expired'    => $expiry['is_expired'],
+			'amount'        => $payment['amount'],
+			'paid_amount'   => $payment['paid_amount'],
+			'paid_at'       => $payment['paid_at'],
+			'expires_at'    => $expiry['expires_at'],
+			'expires_at_ts' => $expiry['expires_at_ts'],
+			'server_now_ts' => $expiry['server_now_ts'],
+			'seconds_left'  => $expiry['seconds_left'],
 		);
+	}
+
+	/**
+	 * Thông tin hạn dùng của một bản ghi, quy về CÙNG MỘT hệ quy chiếu thời
+	 * gian (giờ local của site) để hiệu số giây luôn đúng dù máy bán lệch giờ.
+	 */
+	private static function expiry_info(array $payment)
+	{
+		$now_ts     = strtotime(current_time('mysql'));
+		$expires_at = (string) ($payment['expires_at'] ?? '');
+		$expires_ts = ($expires_at !== '' && $expires_at !== '0000-00-00 00:00:00')
+			? strtotime($expires_at)
+			: 0;
+
+		$seconds_left = $expires_ts > 0 ? max(0, $expires_ts - $now_ts) : 0;
+		$is_expired   = in_array($payment['status'] ?? '', array(TTCK_Payments::STATUS_EXPIRED), true)
+			|| ($payment['status'] ?? '') === TTCK_Payments::STATUS_CANCELLED
+			|| ($expires_ts > 0 && $seconds_left === 0 && ($payment['status'] ?? '') === TTCK_Payments::STATUS_PENDING);
+
+		return array(
+			'expires_at'    => $expires_at,
+			'expires_at_ts' => $expires_ts,
+			'server_now_ts' => $now_ts,
+			'seconds_left'  => $seconds_left,
+			'is_expired'    => (bool) $is_expired,
+		);
+	}
+
+	/**
+	 * Huỷ mã QR cũ và sinh mã mới cho cùng một đơn (nút "Tạo mã mới").
+	 *
+	 * Giữ nguyên ngân hàng / số tiền / source / source_ref / bill_code / payload
+	 * của bản ghi cũ; cho phép override `amount` và `expires_in`.
+	 *
+	 * @return array|WP_Error Bản ghi mới đã decorate.
+	 */
+	public static function replace_payment($old_id, array $overrides = array())
+	{
+		$old = TTCK_Payments::get((int) $old_id);
+		if (!$old) {
+			return new WP_Error('ttck_not_found', __('Không tìm thấy yêu cầu thanh toán.', 'thanh-toan-chuyen-khoan'));
+		}
+
+		if ($old['status'] === TTCK_Payments::STATUS_PAID) {
+			return new WP_Error('ttck_already_paid', __('Yêu cầu thanh toán đã được xử lý trước đó.', 'thanh-toan-chuyen-khoan'));
+		}
+
+		TTCK_Payments::cancel((int) $old_id, 'POS bấm "Tạo mã mới", huỷ mã QR cũ.');
+
+		$args = array(
+			'bank_id'    => 'ttck_up_' . $old['bank_id'],
+			'amount'     => isset($overrides['amount']) ? $overrides['amount'] : $old['amount'],
+			'source'     => $old['source'],
+			'source_ref' => $old['source_ref'],
+			'bill_code'  => $old['bill_code'] ?? '',
+			'note'       => $old['note'],
+		);
+
+		if (isset($overrides['expires_in'])) {
+			$args['expires_in'] = (int) $overrides['expires_in'];
+		}
+
+		$old_payload = self::get_payload((int) $old_id);
+		if (is_array($old_payload)) {
+			$args['payload'] = $old_payload;
+		}
+
+		return self::create_payment($args);
 	}
 
 	/**
@@ -316,6 +430,14 @@ class TTCK_API
 		$payment['qr_type'] = (is_numeric($payment['bin']) && $payment['bin'] !== '') ? 'vietqr' : $bank['qr'];
 		$payment['bank_label'] = $bank['label'];
 		$payment['bank_icon']  = TTCK_Banks::icon_url($payment['bank_id']);
+
+		// Hạn dùng mã QR — POS dùng để chạy đồng hồ đếm ngược và khoá nút.
+		$expiry = self::expiry_info($payment);
+		$payment['expires_at']    = $expiry['expires_at'];
+		$payment['expires_at_ts'] = $expiry['expires_at_ts'];
+		$payment['server_now_ts'] = $expiry['server_now_ts'];
+		$payment['seconds_left']  = $expiry['seconds_left'];
+		$payment['is_expired']    = $expiry['is_expired'];
 
 		// Giữ nguyên hình dạng mảng mà POS đang dùng để hiển thị.
 		$payment['gateway_info'] = array(

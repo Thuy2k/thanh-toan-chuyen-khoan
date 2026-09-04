@@ -452,22 +452,41 @@ class TTCKPayment
 				);
 
 				$ref_code = ttck_parse_code($des, $prefix, $case_insensitive);
-				if (is_null($ref_code)) {
-					$result['msg'][] = 'Payment code not found from transaction content: ' . $des;
+				$payment  = null;
+
+				if (!is_null($ref_code)) {
+					$payment = TTCK_Payments::get_by_ref($ref_code);
+					if (!$payment) {
+						// Dự phòng: mã cũ có thể lệch hoa/thường so với lúc tạo.
+						$payment_id = ttck_parse_order_id($des, $prefix, $case_insensitive);
+						$payment    = $payment_id ? TTCK_Payments::get($payment_id) : null;
+					}
+				}
+
+				// Lưới an toàn: nội dung CK kiểu POS là mã phiếu bán (không có
+				// <tiền tố>ID). Dò từng cụm chữ-số trong nội dung theo bill_code.
+				if (!$payment) {
+					if (preg_match_all('/[A-Za-z0-9.]{6,}/', (string) $des, $tokens)) {
+						foreach ($tokens[0] as $token) {
+							$token = strtoupper(trim($token, '.'));
+							$payment = TTCK_Payments::get_by_bill_code($token);
+							if (!$payment) {
+								$payment = TTCK_Payments::get_by_bill_code(preg_replace('/Z+$/', '', $token));
+							}
+							if ($payment) {
+								$ref_code = $payment['ref_code'];
+								break;
+							}
+						}
+					}
+				}
+
+				if (!$payment) {
+					$result['msg'][] = 'Payment not found from transaction content: ' . $des;
 					continue;
 				}
 
-				$payment = TTCK_Payments::get_by_ref($ref_code);
-				if (!$payment) {
-					// Dự phòng: mã cũ có thể lệch hoa/thường so với lúc tạo.
-					$payment_id = ttck_parse_order_id($des, $prefix, $case_insensitive);
-					$payment    = $payment_id ? TTCK_Payments::get($payment_id) : null;
-				}
-
-				if (!$payment) {
-					$result['msg'][] = 'Payment not found: ' . $ref_code;
-					continue;
-				}
+				$ref_code = $ref_code ?: $payment['ref_code'];
 
 				$settled = TTCK_Payments::settle($payment['id'], $transaction->amount, array(
 					'description' => (string) $transaction->description,
@@ -480,6 +499,11 @@ class TTCKPayment
 						$result['error']  = 0;
 						$result['msg'][]  = 'Transaction processed before ' . $ref_code . ' success';
 						break;
+					}
+					if ('ttck_expired' === $code) {
+						$result['error'] = 1;
+						$result['msg'][] = 'Payment request ' . $ref_code . ' has expired';
+						continue;
 					}
 					$result['error'] = 1;
 					$result['msg'][] = $settled->get_error_message();

@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
 
 class TTCK_Payments
 {
-	const DB_VERSION = '1.0.0';
+	const DB_VERSION = '1.1.0';
 
 	const STATUS_PENDING   = 'pending';
 	const STATUS_PAID      = 'paid';
@@ -54,6 +54,7 @@ class TTCK_Payments
 		$sql = "CREATE TABLE {$table} (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			ref_code VARCHAR(64) NOT NULL DEFAULT '',
+			bill_code VARCHAR(64) NOT NULL DEFAULT '',
 			qr_key VARCHAR(32) NOT NULL DEFAULT '',
 			bank_id VARCHAR(40) NOT NULL DEFAULT '',
 			bin VARCHAR(20) NOT NULL DEFAULT '',
@@ -78,6 +79,7 @@ class TTCK_Payments
 			paid_at DATETIME NULL,
 			PRIMARY KEY  (id),
 			KEY ref_code (ref_code),
+			KEY bill_code (bill_code),
 			KEY status (status),
 			KEY source_ref (source, source_ref),
 			KEY created_at (created_at)
@@ -117,9 +119,12 @@ class TTCK_Payments
 			$expires_in = TTCKPayment::get_setting('payment_expire_minutes', 30) * MINUTE_IN_SECONDS;
 		}
 
+		$bill_code = sanitize_text_field((string) ($args['bill_code'] ?? ''));
+
 		$now  = self::now();
 		$data = array(
 			'ref_code'       => '',
+			'bill_code'      => $bill_code,
 			'qr_key'         => ttck_generate_random_string(16),
 			'bank_id'        => $bank_id,
 			'bin'            => sanitize_text_field((string) ($args['bin'] ?? TTCK_Banks::bin($bank_id))),
@@ -151,7 +156,21 @@ class TTCK_Payments
 		// ref_code = <tiền tố>ID: đúng định dạng mà app ngân hàng/Telegram bóc tách.
 		$prefix   = (string) TTCKPayment::get_setting(array('bank_transfer', 'transaction_prefix'), '');
 		$ref_code = $prefix . $id;
-		$content  = TTCK_Banks::ascii(TTCKPayment::transaction_text($ref_code, null));
+
+		/*
+		 * Nội dung chuyển khoản:
+		 *  - Có bill_code (đơn từ POS, dù nội dung không còn in mã phiếu — cột
+		 *    bill_code vẫn lưu để tra cứu/đối soát nội bộ): nội dung ngắn gọn
+		 *    "TT QR cho CT TGS - <tên shop>" do TTCK_API dựng, ưu tiên nhận diện
+		 *    cửa hàng thay vì mã phiếu (nhiều app ngân hàng cắt nội dung dài).
+		 *  - Không có bill_code: giữ hành vi cũ (nội dung = <tiền tố>ID) để app
+		 *    ngân hàng / Telegram tự bóc tách và xác nhận.
+		 */
+		if ($bill_code !== '' && is_callable(array('TTCK_API', 'build_transfer_content'))) {
+			$content = TTCK_Banks::ascii(TTCK_API::build_transfer_content($bill_code));
+		} else {
+			$content = TTCK_Banks::ascii(TTCKPayment::transaction_text($ref_code, null));
+		}
 
 		$wpdb->update(
 			self::table(),
@@ -187,6 +206,33 @@ class TTCK_Payments
 
 		$row = $wpdb->get_row(
 			$wpdb->prepare('SELECT * FROM ' . self::table() . ' WHERE ref_code = %s ORDER BY id DESC LIMIT 1', $ref_code),
+			ARRAY_A
+		);
+
+		return $row ? self::hydrate($row) : null;
+	}
+
+	/**
+	 * Tìm yêu cầu thanh toán theo mã phiếu bán (bill_code).
+	 *
+	 * Ưu tiên bản còn treo (pending) và mới nhất — mã phiếu có thể xuất hiện ở
+	 * nhiều bản ghi nếu nhân viên bấm "Tạo mã mới" vài lần cho cùng một đơn.
+	 */
+	public static function get_by_bill_code($bill_code)
+	{
+		global $wpdb;
+
+		$bill_code = trim((string) $bill_code);
+		if ($bill_code === '') {
+			return null;
+		}
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				'SELECT * FROM ' . self::table() . " WHERE bill_code = %s
+				 ORDER BY (status = 'pending') DESC, id DESC LIMIT 1",
+				$bill_code
+			),
 			ARRAY_A
 		);
 
@@ -249,6 +295,15 @@ class TTCK_Payments
 
 		if ($payment['status'] === self::STATUS_CANCELLED) {
 			return new WP_Error('ttck_cancelled', __('Yêu cầu thanh toán đã bị huỷ.', 'thanh-toan-chuyen-khoan'));
+		}
+
+		// Quá hạn thì KHÔNG settle nữa — quét lại mã QR cũ cũng không ăn tiền vào đơn.
+		if (self::maybe_expire($payment)) {
+			return new WP_Error('ttck_expired', __('Yêu cầu thanh toán đã hết hạn.', 'thanh-toan-chuyen-khoan'));
+		}
+
+		if ($payment['status'] === self::STATUS_EXPIRED) {
+			return new WP_Error('ttck_expired', __('Yêu cầu thanh toán đã hết hạn.', 'thanh-toan-chuyen-khoan'));
 		}
 
 		if ($payment['status'] === self::STATUS_PAID) {
@@ -416,6 +471,36 @@ class TTCK_Payments
 			self::STATUS_PENDING,
 			self::now()
 		));
+	}
+
+	/**
+	 * Nếu bản ghi đang treo mà đã quá `expires_at` thì chuyển sang trạng thái
+	 * hết hạn ngay (không chờ cron ngày). Trả về true nếu vừa chuyển.
+	 *
+	 * @param array $payment Bản ghi đã hydrate — sẽ được cập nhật tại chỗ.
+	 */
+	public static function maybe_expire(array &$payment)
+	{
+		if (($payment['status'] ?? '') !== self::STATUS_PENDING) {
+			return false;
+		}
+
+		$expires_at = (string) ($payment['expires_at'] ?? '');
+		if ($expires_at === '' || $expires_at === '0000-00-00 00:00:00') {
+			return false;
+		}
+
+		if (strtotime($expires_at) >= strtotime(self::now())) {
+			return false;
+		}
+
+		self::update((int) $payment['id'], array('status' => self::STATUS_EXPIRED));
+		$payment['status']  = self::STATUS_EXPIRED;
+		$payment['is_paid'] = false;
+
+		do_action('ttck_payment_status_changed', self::get((int) $payment['id']));
+
+		return true;
 	}
 
 	private static function hydrate(array $row)
