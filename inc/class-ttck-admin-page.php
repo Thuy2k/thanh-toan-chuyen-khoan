@@ -31,6 +31,8 @@ class TTCK_Admin_Page
 			$this->save_settings();
 		} elseif ('ttck_save_banks' === $action) {
 			$this->save_banks();
+		} elseif ('ttck_save_vietinbank' === $action) {
+			$this->save_vietinbank();
 		} elseif ('ttck_reset_token' === $action) {
 			$this->reset_secure_token();
 		} elseif ('ttck_export_accounts' === $action) {
@@ -40,6 +42,14 @@ class TTCK_Admin_Page
 		}
 
 		add_action('admin_menu', array($this, 'register_menu'));
+
+		/*
+		 * AJAX test cho tab VietinBank — không reload trang khi bấm nút Test.
+		 * Endpoint đăng ký ở đây (admin page class) thay vì TTCKPayment để giữ
+		 * trách nhiệm sát với UI: render form → xử lý test.
+		 */
+		add_action('wp_ajax_ttck_test_vietinbank_login', array($this, 'ajax_test_vietinbank_login'));
+		add_action('wp_ajax_ttck_test_vietinbank_search', array($this, 'ajax_test_vietinbank_search'));
 	}
 
 	public function register_menu()
@@ -87,6 +97,20 @@ class TTCK_Admin_Page
 			__('Xuất cấu hình', 'thanh-toan-chuyen-khoan'),
 			self::export_capability(),
 			'ttck-export',
+			array($this, 'render_page')
+		);
+
+		/*
+		 * Tab VietinBank API — cùng quyền với Xuất cấu hình (manage_network_options
+		 * trên multisite) vì chứa secret cấu hình ngân hàng. Đặt NGAY SAU Xuất
+		 * cấu hình theo yêu cầu.
+		 */
+		add_submenu_page(
+			self::MENU_SLUG,
+			__('VietinBank API', 'thanh-toan-chuyen-khoan'),
+			__('VietinBank API', 'thanh-toan-chuyen-khoan'),
+			self::export_capability(),
+			'ttck-vietinbank',
 			array($this, 'render_page')
 		);
 	}
@@ -251,6 +275,488 @@ class TTCK_Admin_Page
 	}
 
 	/* ---------------------------------------------------------------------
+	 * VietinBank API
+	 * ------------------------------------------------------------------ */
+
+	/**
+	 * Lưu cấu hình VietinBank từ form tab "VietinBank API".
+	 *
+	 * Chỉ 5 key lưu DB — đều required:
+	 *   vietinbank_client_id, vietinbank_username, vietinbank_password_hash,
+	 *   vietinbank_signature, vietinbank_merchant_id.
+	 *
+	 * 4 tham số còn lại (captcha_resp, ip_address, language, timeout) hardcode
+	 * trong TTCK_VietinBank_API, KHÔNG có mặt trên form.
+	 *
+	 * Mật khẩu: form dùng input password đặt tên `settings[vietinbank_password]`
+	 * (khác với key DB) — đây là chính sách đổi tên để đảm bảo plain text
+	 * không bao giờ được ghi thẳng vào DB.
+	 */
+	public function save_vietinbank()
+	{
+		if (!$this->verify('ttck_save_vietinbank') || !$this->can_export()) {
+			$this->error_message();
+			return;
+		}
+
+		$posted = wp_unslash($_POST['settings'] ?? array());
+		$stored = TTCKPayment::get_settings();
+		$next   = $stored;
+
+		$client_id   = sanitize_text_field($posted['vietinbank_client_id']   ?? '');
+		$username    = sanitize_text_field($posted['vietinbank_username']    ?? '');
+		$signature   = sanitize_text_field($posted['vietinbank_signature']   ?? '');
+		$merchant_id = sanitize_text_field($posted['vietinbank_merchant_id'] ?? '');
+
+		/*
+		 * Validate 4 field required (password xử lý riêng bên dưới vì nó có
+		 * thể để trống khi đã lưu hash từ lần trước).
+		 */
+		$missing = array();
+		if ($client_id   === '') { $missing[] = 'Client ID'; }
+		if ($username    === '') { $missing[] = 'Username'; }
+		if ($signature   === '') { $missing[] = 'Signature'; }
+		if ($merchant_id === '') { $missing[] = 'Merchant ID'; }
+
+		if (!empty($missing)) {
+			$this->message = '<div class="notice notice-error"><p><strong>'
+				. esc_html__('Thiếu trường bắt buộc:', 'thanh-toan-chuyen-khoan')
+				. '</strong> '
+				. esc_html(implode(', ', $missing))
+				. '</p></div>';
+			return;
+		}
+
+		$next['vietinbank_client_id']   = $client_id;
+		$next['vietinbank_username']    = $username;
+		$next['vietinbank_signature']   = $signature;
+		$next['vietinbank_merchant_id'] = $merchant_id;
+
+		/*
+		 * Mật khẩu — 3 nhánh:
+		 *   1. Form có plain      → SHA-256, lưu hash.
+		 *   2. Form trống + DB đã có hash → giữ hash cũ.
+		 *   3. Form trống + DB chưa có   → lỗi, bắt buộc nhập lần đầu.
+		 */
+		$plain = (string) ($posted['vietinbank_password'] ?? '');
+		if ($plain !== '') {
+			$next['vietinbank_password_hash'] = hash('sha256', $plain);
+		} elseif (empty($stored['vietinbank_password_hash'])) {
+			$this->message = '<div class="notice notice-error"><p><strong>'
+				. esc_html__('Chưa có mật khẩu.', 'thanh-toan-chuyen-khoan')
+				. '</strong> '
+				. esc_html__('Phải nhập mật khẩu lần đầu.', 'thanh-toan-chuyen-khoan')
+				. '</p></div>';
+			return;
+		}
+
+		TTCKPayment::update_settings($next);
+		$this->settings = TTCKPayment::get_settings();
+		$this->saved_message();
+	}
+
+/**
+	 * Render tab VietinBank API — thiết kế gọn, đồng bộ:
+	 *   - Form config nằm ngang, label 160px, status + required indicator
+	 *     dùng class chung (không inline style).
+	 *   - Mỗi API là một <details class="ttck-vtb-card">: URL hiển thị inline
+	 *     trong summary, summary dùng ::before custom triangle (1 mũi tên, ẩn
+	 *     marker mặc định của trình duyệt).
+	 *   - Body mẫu / Response / Curl preview là <details class="ttck-vtb-nested">
+	 *     lồng bên trong, gấp mở được.
+	 *   - Test inputs dùng flex ngang, action row có dashed border-top ngăn
+	 *     cách với phần test form.
+	 *
+	 * Config lưu DB (5 key required) hiển thị thành span data-* để JS đọc
+	 * khi build curl — tránh gọi AJAX chỉ để lấy config.
+	 */
+	private function render_vietinbank_tab()
+	{
+		$settings      = $this->settings;
+		$client_id     = (string) $settings['vietinbank_client_id'];
+		$username      = (string) $settings['vietinbank_username'];
+		$signature     = (string) $settings['vietinbank_signature'];
+		$merchant_id   = (string) $settings['vietinbank_merchant_id'];
+		$password_hash = (string) $settings['vietinbank_password_hash'];
+		$has_password  = $password_hash !== '';
+		?>
+		<div class="ttck-vtb-wrap">
+
+		<!-- Config ẩn — JS đọc để build curl, không tốn pixel. -->
+		<span data-vtb-config="client_id"     data-vtb-value="<?php echo esc_attr($client_id); ?>"     hidden></span>
+		<span data-vtb-config="username"      data-vtb-value="<?php echo esc_attr($username); ?>"      hidden></span>
+		<span data-vtb-config="password_hash" data-vtb-value="<?php echo esc_attr($password_hash); ?>" hidden></span>
+		<span data-vtb-config="signature"     data-vtb-value="<?php echo esc_attr($signature); ?>"     hidden></span>
+		<span data-vtb-config="merchant_id"   data-vtb-value="<?php echo esc_attr($merchant_id); ?>"   hidden></span>
+
+		<!-- ================== Cấu hình ================== -->
+		<details class="ttck-vtb-card" open>
+			<summary><?php esc_html_e('Cấu hình VietinBank API', 'thanh-toan-chuyen-khoan'); ?></summary>
+
+			<form method="post">
+				<input type="hidden" name="action" value="ttck_save_vietinbank">
+				<input type="hidden" name="ttck_nonce" value="<?php echo esc_attr(wp_create_nonce('ttck_save_vietinbank')); ?>">
+
+				<p class="ttck-vtb-small" style="margin-bottom:10px;">
+					<?php esc_html_e('5 trường bắt buộc, không có default. Mật khẩu tự SHA-256 trước khi lưu — DB không bao giờ có plain text.', 'thanh-toan-chuyen-khoan'); ?>
+				</p>
+
+				<table class="ttck-vtb-table" role="presentation">
+					<tbody>
+						<tr>
+							<th scope="row"><label for="vietinbank_client_id"><?php esc_html_e('Client ID', 'thanh-toan-chuyen-khoan'); ?><span class="ttck-vtb-required">*</span></label></th>
+							<td>
+								<input name="settings[vietinbank_client_id]" id="vietinbank_client_id" type="text"
+									class="regular-text ttck-vtb-required-bar" value="<?php echo esc_attr($client_id); ?>" required>
+								<small class="ttck-vtb-small">Header <code>ClientId</code> gửi lên VietinBank.</small>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="vietinbank_username"><?php esc_html_e('Username', 'thanh-toan-chuyen-khoan'); ?><span class="ttck-vtb-required">*</span></label></th>
+							<td>
+								<input name="settings[vietinbank_username]" id="vietinbank_username" type="text"
+									class="regular-text ttck-vtb-required-bar" value="<?php echo esc_attr($username); ?>" required>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="vietinbank_password"><?php esc_html_e('Mật khẩu', 'thanh-toan-chuyen-khoan'); ?><span class="ttck-vtb-required">*</span></label></th>
+							<td>
+								<?php if ($has_password): ?>
+									<span class="ttck-vtb-status-ok"><?php esc_html_e('Đã lưu SHA-256 hash (64 hex)', 'thanh-toan-chuyen-khoan'); ?></span>
+									<label class="ttck-vtb-inline-toggle">
+										<input type="checkbox" data-toggle-target="vietinbank_password_input">
+										<span><?php esc_html_e('đổi mật khẩu', 'thanh-toan-chuyen-khoan'); ?></span>
+									</label>
+									<input type="password" id="vietinbank_password_input"
+										class="ttck-vtb-conditional"
+										name="settings[vietinbank_password]"
+										placeholder="<?php esc_attr_e('Mật khẩu mới...', 'thanh-toan-chuyen-khoan'); ?>"
+										autocomplete="new-password">
+								<?php else: ?>
+									<input name="settings[vietinbank_password]" id="vietinbank_password" type="password"
+										class="regular-text ttck-vtb-required-bar" value="" required
+										placeholder="<?php esc_attr_e('Nhập mật khẩu', 'thanh-toan-chuyen-khoan'); ?>"
+										autocomplete="new-password">
+								<?php endif; ?>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="vietinbank_signature"><?php esc_html_e('Signature', 'thanh-toan-chuyen-khoan'); ?><span class="ttck-vtb-required">*</span></label></th>
+							<td>
+								<input name="settings[vietinbank_signature]" id="vietinbank_signature" type="text"
+									class="regular-text ttck-vtb-required-bar" value="<?php echo esc_attr($signature); ?>" required>
+								<small class="ttck-vtb-small">Header <code>Signature</code> — có thể đổi theo phiên, hỏi VietinBank nếu không biết.</small>
+							</td>
+						</tr>
+						<tr>
+							<th scope="row"><label for="vietinbank_merchant_id"><?php esc_html_e('Merchant ID', 'thanh-toan-chuyen-khoan'); ?><span class="ttck-vtb-required">*</span></label></th>
+							<td>
+								<input name="settings[vietinbank_merchant_id]" id="vietinbank_merchant_id" type="text"
+									class="regular-text ttck-vtb-required-bar" value="<?php echo esc_attr($merchant_id); ?>" required>
+								<small class="ttck-vtb-small">Header <code>merchantId</code> — chỉ dùng cho API truy vấn.</small>
+							</td>
+						</tr>
+					</tbody>
+				</table>
+
+				<div class="ttck-vtb-save-bar">
+					<button type="submit" class="button button-primary"><?php esc_html_e('Lưu cấu hình', 'thanh-toan-chuyen-khoan'); ?></button>
+				</div>
+			</form>
+		</details>
+
+		<!-- ================== API 1: Login ================== -->
+		<details class="ttck-vtb-card" open>
+			<summary>
+				<span>1. <?php esc_html_e('Đăng nhập', 'thanh-toan-chuyen-khoan'); ?></span>
+				<span class="ttck-vtb-summary-url">POST <?php echo esc_html(TTCK_VietinBank_API::LOGIN_URL); ?></span>
+			</summary>
+
+			<details class="ttck-vtb-nested">
+				<summary><?php esc_html_e('Body mẫu + Headers', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<p class="ttck-vtb-small" style="margin-bottom:8px;">
+					<strong>Headers:</strong> <code>Content-Type</code>, <code>Accept</code>, <code>ClientId</code> (config), <code>Signature</code> (config), <code>Origin</code>, <code>Referer</code>, <code>User-Agent</code>
+				</p>
+				<pre class="ttck-vtb-body-sample"><code>{
+  "username":     "&lt;lấy từ Cấu hình&gt;",
+  "password":     "&lt;SHA-256 hash từ Cấu hình&gt;",
+  "captcha_resp": "&lt;nhập bên dưới&gt;",
+  "device":       { "os": {"name":null,"version":null}, "browser": {"name":null,"version":null}, "location": {"long":0,"lat":0} },
+  "ip_address":   "&lt;nhập bên dưới&gt;",
+  "language":     "&lt;nhập bên dưới&gt;"
+}</code></pre>
+			</details>
+
+			<h4 style="margin-bottom:8px;"><?php esc_html_e('Test trực tiếp', 'thanh-toan-chuyen-khoan'); ?></h4>
+			<form class="ttck-vtb-test-form">
+				<label>
+					<span>captcha_resp</span>
+					<input type="text" class="ttck-vtb-narrow" data-vtb-field="captcha_resp"
+						value="<?php echo esc_attr(TTCK_VietinBank_API::DEFAULT_CAPTCHA_RESP); ?>">
+				</label>
+				<label>
+					<span>ip_address</span>
+					<input type="text" class="ttck-vtb-wide" data-vtb-field="ip_address"
+						value="<?php echo esc_attr(TTCK_VietinBank_API::DEFAULT_IP_ADDRESS); ?>">
+				</label>
+				<label>
+					<span>language</span>
+					<select data-vtb-field="language">
+						<option value="vi" <?php selected(TTCK_VietinBank_API::DEFAULT_LANGUAGE, 'vi'); ?>>vi</option>
+						<option value="en" <?php selected(TTCK_VietinBank_API::DEFAULT_LANGUAGE, 'en'); ?>>en</option>
+					</select>
+				</label>
+			</form>
+
+			<div class="ttck-vtb-actions">
+				<button type="button" class="button button-primary ttck-vtb-test-login"><?php esc_html_e('Test login', 'thanh-toan-chuyen-khoan'); ?></button>
+				<button type="button" class="button ttck-vtb-copy-curl-login"><?php esc_html_e('Copy curl', 'thanh-toan-chuyen-khoan'); ?></button>
+				<span class="ttck-vtb-hint"><?php esc_html_e('Token lưu transient 1 giờ — Test search dùng lại được.', 'thanh-toan-chuyen-khoan'); ?></span>
+			</div>
+
+			<details class="ttck-vtb-nested ttck-vtb-response-wrap" hidden>
+				<summary><?php esc_html_e('Response', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<div class="ttck-vtb-response"></div>
+			</details>
+			<details class="ttck-vtb-nested ttck-vtb-curl-wrap" hidden>
+				<summary><?php esc_html_e('Curl preview', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<textarea class="ttck-vtb-curl-preview" readonly></textarea>
+			</details>
+		</details>
+
+		<!-- ================== API 2: Search ================== -->
+		<details class="ttck-vtb-card" open>
+			<summary>
+				<span>2. <?php esc_html_e('Truy vấn giao dịch', 'thanh-toan-chuyen-khoan'); ?></span>
+				<span class="ttck-vtb-summary-url">POST <?php echo esc_html(TTCK_VietinBank_API::SEARCH_URL); ?>?page=0&amp;size=20&amp;sort=txnDate,desc</span>
+			</summary>
+
+			<details class="ttck-vtb-nested">
+				<summary><?php esc_html_e('Body mẫu + Headers', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<p class="ttck-vtb-small" style="margin-bottom:8px;">
+					<strong>Headers:</strong> <code>Authorization: Bearer &lt;accessToken&gt;</code>, <code>ClientId</code> (config), <code>merchantId</code> (config), <code>x-lang</code>, <code>Content-Type</code>, <code>Accept</code>, <code>Origin</code>, <code>Referer</code>, <code>User-Agent</code>
+				</p>
+				<pre class="ttck-vtb-body-sample"><code>{
+  "searchType": "&lt;nhập bên dưới&gt;",
+  "startDate":  "&lt;dd/MM/yyyy&gt;",
+  "endDate":    "&lt;dd/MM/yyyy&gt;"
+}</code></pre>
+			</details>
+
+			<h4 style="margin-bottom:8px;"><?php esc_html_e('Test trực tiếp', 'thanh-toan-chuyen-khoan'); ?></h4>
+			<form class="ttck-vtb-test-form">
+				<label>
+					<span>Từ ngày</span>
+					<input type="text" class="ttck-vtb-narrow" data-vtb-field="start_date"
+						value="<?php echo esc_attr(date('d/m/Y')); ?>" placeholder="dd/MM/yyyy" required>
+				</label>
+				<label>
+					<span>Đến ngày</span>
+					<input type="text" class="ttck-vtb-narrow" data-vtb-field="end_date"
+						value="<?php echo esc_attr(date('d/m/Y')); ?>" placeholder="dd/MM/yyyy" required>
+				</label>
+				<label>
+					<span>searchType</span>
+					<select data-vtb-field="search_type">
+						<option value="0">0 — <?php esc_html_e('Tất cả', 'thanh-toan-chuyen-khoan'); ?></option>
+						<option value="1">1 — <?php esc_html_e('Đã ghi có', 'thanh-toan-chuyen-khoan'); ?></option>
+					</select>
+				</label>
+				<label>
+					<span>page</span>
+					<input type="number" min="0" class="ttck-vtb-narrow" data-vtb-field="page" value="0">
+				</label>
+				<label>
+					<span>size</span>
+					<input type="number" min="1" max="200" class="ttck-vtb-narrow" data-vtb-field="size" value="20">
+				</label>
+				<label>
+					<span>sort</span>
+					<input type="text" class="ttck-vtb-wide" data-vtb-field="sort" value="txnDate,desc">
+				</label>
+				<label>
+					<span>language</span>
+					<select data-vtb-field="language">
+						<option value="vi" <?php selected(TTCK_VietinBank_API::DEFAULT_LANGUAGE, 'vi'); ?>>vi</option>
+						<option value="en" <?php selected(TTCK_VietinBank_API::DEFAULT_LANGUAGE, 'en'); ?>>en</option>
+					</select>
+				</label>
+			</form>
+
+			<div class="ttck-vtb-actions">
+				<button type="button" class="button button-primary ttck-vtb-test-search"><?php esc_html_e('Test search', 'thanh-toan-chuyen-khoan'); ?></button>
+				<button type="button" class="button ttck-vtb-copy-curl-search"><?php esc_html_e('Copy curl', 'thanh-toan-chuyen-khoan'); ?></button>
+				<span class="ttck-vtb-hint"><?php esc_html_e('Yêu cầu đã Test login trước.', 'thanh-toan-chuyen-khoan'); ?></span>
+			</div>
+
+			<details class="ttck-vtb-nested ttck-vtb-response-wrap" hidden>
+				<summary><?php esc_html_e('Response', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<div class="ttck-vtb-response"></div>
+			</details>
+			<details class="ttck-vtb-nested ttck-vtb-curl-wrap" hidden>
+				<summary><?php esc_html_e('Curl preview', 'thanh-toan-chuyen-khoan'); ?></summary>
+				<textarea class="ttck-vtb-curl-preview" readonly></textarea>
+			</details>
+		</details>
+
+		<p class="ttck-vtb-small" style="margin-top:14px;">
+			<strong><?php esc_html_e('Lưu ý:', 'thanh-toan-chuyen-khoan'); ?></strong>
+			<?php esc_html_e('captcha_resp / ip_address / language / timeout không lưu DB — dùng default trong TTCK_VietinBank_API khi caller không truyền. Code khác có thể override.', 'thanh-toan-chuyen-khoan'); ?>
+		</p>
+		</div>
+		<?php
+	}
+
+	// ---------------------------------------------------------------------
+	// AJAX test cho tab VietinBank
+	// ---------------------------------------------------------------------
+
+	/**
+	 * Test API 1: login. Lấy cấu hình từ DB, nhận 3 field runtime từ form test
+	 * (captcha_resp, ip_address, language), gọi TTCK_VietinBank_API::login().
+	 * Token trả về lưu vào transient 1 giờ để test search dùng lại — đỡ phải
+	 * login lại mỗi lần bấm Test search.
+	 */
+	public function ajax_test_vietinbank_login()
+	{
+		check_ajax_referer('ttck_test_vietinbank', 'nonce');
+
+		if (!$this->can_export()) {
+			wp_send_json_error(array('message' => 'Không có quyền.'), 403);
+		}
+
+		$settings = TTCKPayment::get_settings();
+
+		$required = array(
+			'vietinbank_client_id'     => 'Client ID',
+			'vietinbank_username'      => 'Username',
+			'vietinbank_password_hash' => 'Mật khẩu (đã hash)',
+			'vietinbank_signature'     => 'Signature',
+			'vietinbank_merchant_id'   => 'Merchant ID',
+		);
+		$missing = array();
+		foreach ($required as $key => $label) {
+			if (empty($settings[$key])) {
+				$missing[] = $label;
+			}
+		}
+		if (!empty($missing)) {
+			wp_send_json_error(array(
+				'message' => 'Chưa cấu hình đủ: ' . implode(', ', $missing) . '. Vào tab "VietinBank API" → Lưu cấu hình trước.',
+			));
+		}
+
+		$body = wp_unslash($_POST['body'] ?? array());
+		$api  = new TTCK_VietinBank_API();
+		$resp = $api->login(array(
+			'client_id'     => $settings['vietinbank_client_id'],
+			'signature'     => $settings['vietinbank_signature'],
+			'username'      => $settings['vietinbank_username'],
+			'password_hash' => $settings['vietinbank_password_hash'],
+			'captcha_resp'  => sanitize_text_field($body['captcha_resp'] ?? TTCK_VietinBank_API::DEFAULT_CAPTCHA_RESP),
+			'ip_address'    => sanitize_text_field($body['ip_address']   ?? TTCK_VietinBank_API::DEFAULT_IP_ADDRESS),
+			'language'      => sanitize_text_field($body['language']     ?? TTCK_VietinBank_API::DEFAULT_LANGUAGE),
+		));
+
+		if (!$resp['ok']) {
+			wp_send_json_error(array(
+				'message'  => 'Đăng nhập thất bại: ' . ($resp['error'] ?: ('HTTP ' . $resp['status'])),
+				'response' => $resp,
+			));
+		}
+
+		/*
+		 * Rút accessToken ra — thử nhiều tên key phổ biến vì schema VietinBank
+		 * có thể đổi theo phiên. Tìm được thì cache vào transient 1 giờ để
+		 * test search khỏi login lại.
+		 */
+		$access_token = '';
+		if (is_array($resp['data'])) {
+			foreach (array('accessToken', 'access_token', 'token', 'id_token', 'jsonWebToken') as $k) {
+				if (!empty($resp['data'][$k]) && is_string($resp['data'][$k])) {
+					$access_token = $resp['data'][$k];
+					break;
+				}
+			}
+		}
+
+		$token_preview = '';
+		if ($access_token !== '') {
+			set_transient('ttck_vtb_access_token', $access_token, HOUR_IN_SECONDS);
+			$token_preview = substr($access_token, 0, 40) . '…';
+		}
+
+		wp_send_json_success(array(
+			'message'       => 'Đăng nhập thành công.' . ($token_preview !== '' ? ' Đã lưu token để test search.' : ' Không tìm thấy token trong response — kiểm tra schema.'),
+			'response'      => $resp,
+			'token_preview' => $token_preview,
+		));
+	}
+
+	/**
+	 * Test API 2: payment-transaction/search. Lấy token từ transient (do ajax_test_vietinbank_login
+	 * set trước đó). Nếu chưa có → báo phải login trước. Body 3 field runtime
+	 * (searchType, startDate, endDate) + query 3 field (page, size, sort) + 2
+	 * field runtime (language).
+	 */
+	public function ajax_test_vietinbank_search()
+	{
+		check_ajax_referer('ttck_test_vietinbank', 'nonce');
+
+		if (!$this->can_export()) {
+			wp_send_json_error(array('message' => 'Không có quyền.'), 403);
+		}
+
+		$settings = TTCKPayment::get_settings();
+		foreach (array('vietinbank_client_id', 'vietinbank_merchant_id') as $key) {
+			if (empty($settings[$key])) {
+				wp_send_json_error(array(
+					'message' => 'Chưa cấu hình ' . $key . '. Vào tab "VietinBank API" → Lưu cấu hình trước.',
+				));
+			}
+		}
+
+		$token = get_transient('ttck_vtb_access_token');
+		if (!$token) {
+			wp_send_json_error(array('message' => 'Chưa có token. Bấm "Test login" trước để lấy Bearer token.'));
+		}
+
+		$body = wp_unslash($_POST['body'] ?? array());
+		$start = sanitize_text_field($body['start_date'] ?? '');
+		$end   = sanitize_text_field($body['end_date']   ?? '');
+		if (!preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $start) || !preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $end)) {
+			wp_send_json_error(array('message' => 'Ngày phải theo định dạng dd/MM/yyyy.'));
+		}
+
+		$api  = new TTCK_VietinBank_API();
+		$resp = $api->search_transactions(array(
+			'token'       => $token,
+			'client_id'   => $settings['vietinbank_client_id'],
+			'merchant_id' => $settings['vietinbank_merchant_id'],
+			'start_date'  => $start,
+			'end_date'    => $end,
+			'search_type' => sanitize_text_field($body['search_type'] ?? '0'),
+			'page'        => max(0, intval($body['page'] ?? 0)),
+			'size'        => max(1, min(200, intval($body['size'] ?? 20))),
+			'sort'        => sanitize_text_field($body['sort'] ?? 'txnDate,desc'),
+			'language'    => sanitize_text_field($body['language'] ?? TTCK_VietinBank_API::DEFAULT_LANGUAGE),
+		));
+
+		if (!$resp['ok']) {
+			wp_send_json_error(array(
+				'message'  => 'Truy vấn thất bại: ' . ($resp['error'] ?: ('HTTP ' . $resp['status'])),
+				'response' => $resp,
+			));
+		}
+
+		wp_send_json_success(array(
+			'message'  => 'Truy vấn thành công.',
+			'response' => $resp,
+			'token_preview' => substr($token, 0, 40) . '…',
+		));
+	}
+
+	/* ---------------------------------------------------------------------
 	 * Xuất file tài khoản
 	 * ------------------------------------------------------------------ */
 
@@ -382,6 +888,9 @@ class TTCK_Admin_Page
 			case 'ttck-export':
 				$this->render_export_tab();
 				break;
+			case 'ttck-vietinbank':
+				$this->render_vietinbank_tab();
+				break;
 			default:
 				$this->render_settings_tab();
 				break;
@@ -402,7 +911,8 @@ class TTCK_Admin_Page
 
 		// Tab chốt cấu hình chỉ hiện cho người được phép — xem export_capability()
 		if ($this->can_export()) {
-			$tabs['ttck-export'] = __('Xuất cấu hình', 'thanh-toan-chuyen-khoan');
+			$tabs['ttck-export']     = __('Xuất cấu hình', 'thanh-toan-chuyen-khoan');
+			$tabs['ttck-vietinbank'] = __('VietinBank API', 'thanh-toan-chuyen-khoan');
 		}
 
 		echo '<h2 class="nav-tab-wrapper">';

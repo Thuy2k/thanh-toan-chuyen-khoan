@@ -26,6 +26,7 @@ require_once TTCK_DIR . 'inc/class-ttck-payments.php';
 // Nạp TRƯỚC class-ttck-api.php: từ nay API lấy tài khoản nhận tiền từ file này
 require_once TTCK_DIR . 'inc/class-ttck-account-file.php';
 require_once TTCK_DIR . 'inc/class-ttck-api.php';
+require_once TTCK_DIR . 'inc/class-ttck-vietinbank-api.php';
 
 class TTCKPayment
 {
@@ -56,6 +57,19 @@ class TTCKPayment
 		'tgs_hmac_secret'         => '',
 		'webhook'                 => '',
 		'auto_check_status'       => 0,
+
+		/*
+		 * Cấu hình VietinBank Merchant Portal — tab "VietinBank API" trong admin.
+		 * Cả 5 key đều REQUIRED, KHÔNG có default — admin phải tự nhập. Các
+		 * tham số còn lại (captcha_resp, ip_address, language, timeout) không
+		 * lưu DB, hardcode trong TTCK_VietinBank_API làm fallback khi caller
+		 * không truyền (xem `?? default` pattern trong class client).
+		 */
+		'vietinbank_client_id'     => '',
+		'vietinbank_username'      => '',
+		'vietinbank_password_hash' => '',
+		'vietinbank_signature'     => '',
+		'vietinbank_merchant_id'   => '',
 	);
 
 	public function __construct()
@@ -143,6 +157,31 @@ class TTCKPayment
 		wp_enqueue_style('ttck-style', TTCK_URL . 'assets/css/style.css', array(), '2.0.0');
 		wp_enqueue_script('ttck-qrcode', TTCK_URL . 'assets/js/easy.qrcode.js', array('jquery'), '2.0.0', true);
 		wp_enqueue_script('ttck-js', TTCK_URL . 'assets/js/js.js', array('jquery'), '2.0.0', true);
+
+		/*
+		 * Tab VietinBank API cần JS riêng (nút Test login / Test search + Copy
+		 * curl). Chỉ nạp khi đang mở tab đó — các tab khác không cần.
+		 */
+		if ('ttck-vietinbank' === $page) {
+			wp_enqueue_script(
+				'ttck-vietinbank',
+				TTCK_URL . 'assets/js/ttck-vietinbank.js',
+				array('jquery'),
+				'2.0.0',
+				true
+			);
+			wp_localize_script('ttck-vietinbank', 'TTCK_VTB', array(
+				'ajaxUrl' => admin_url('admin-ajax.php'),
+				'nonce'   => wp_create_nonce('ttck_test_vietinbank'),
+				'i18n'    => array(
+					'copied'    => 'Đã copy curl vào clipboard.',
+					'copyFail'  => 'Trình duyệt không hỗ trợ copy. Chọn thủ công bên dưới.',
+					'processing'=> 'Đang xử lý…',
+					'testLogin' => 'Test login',
+					'testSearch'=> 'Test search',
+				),
+			));
+		}
 	}
 
 	/* ---------------------------------------------------------------------
@@ -876,7 +915,7 @@ class TTCKPayment
 		$stored   = self::get_settings();
 
 		// $_POST vẫn ở dạng slashed nên phải wp_slash() lại giá trị đọc từ DB.
-		foreach (array('telegram_webhook_secret', 'tgs_hmac_secret') as $field) {
+		foreach (array('telegram_webhook_secret', 'tgs_hmac_secret', 'vietinbank_password_hash') as $field) {
 			if (isset($settings[$field]) && $settings[$field] === '***UNCHANGED***') {
 				$_POST['settings'][$field] = wp_slash(isset($stored[$field]) ? $stored[$field] : '');
 			}

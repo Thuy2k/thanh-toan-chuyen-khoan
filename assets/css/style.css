@@ -86,3 +86,316 @@ td .qhtp-bank-icon{
 .qhtp-bank-icon{
     max-width: 100px;
 }
+
+/**
+ * VietinBank API tab — layout gọn và đồng bộ.
+ * Scope: mọi class bắt đầu `.ttck-vtb-` chỉ ảnh hưởng tab này.
+ *
+ * Quy tắc đồng bộ:
+ *   - Padding chuẩn: 16px ngang, 12-16px dọc.
+ *   - Màu chính: text #1d2327, muted #646970, border #dcdcde, ok #1a7f37, lỗi #b32d2e.
+ *   - Font monospace dùng stack: ui-monospace, "SF Mono", Menlo, Consolas, monospace.
+ *   - Disclosure triangle chỉ hiện 1 (qua ::before của summary).
+ */
+
+/* === Reset & base === */
+.ttck-vtb-wrap {
+    font-size: 13px;
+    color: #1d2327;
+    line-height: 1.5;
+}
+.ttck-vtb-wrap h2,
+.ttck-vtb-wrap h3,
+.ttck-vtb-wrap h4 {
+    margin: 0;
+    font-weight: 600;
+}
+
+/* === Card chính: <details class="ttck-vtb-card"> === */
+.ttck-vtb-card {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+    margin: 0 0 14px;
+    overflow: hidden;
+}
+.ttck-vtb-card > summary {
+    /* Reset default summary styling để chỉ còn mũi tên ::before. */
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    list-style: none;
+    padding: 12px 16px;
+    background: #f6f7f7;
+    border-bottom: 1px solid #dcdcde;
+    font-size: 14px;
+    font-weight: 600;
+    user-select: none;
+}
+.ttck-vtb-card > summary::-webkit-details-marker { display: none; }
+.ttck-vtb-card > summary::marker { content: ''; }
+/* Mũi tên custom — dùng border để render tam giác đều, không phụ thuộc font. */
+.ttck-vtb-card > summary::before {
+    content: "";
+    display: inline-block;
+    width: 0;
+    height: 0;
+    border-left: 5px solid #1d2327;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transition: transform .15s;
+    flex-shrink: 0;
+}
+.ttck-vtb-card[open] > summary::before { transform: rotate(90deg); }
+.ttck-vtb-card[open] > summary { border-bottom: 1px solid #dcdcde; }
+.ttck-vtb-card:not([open]) > summary { border-bottom: 0; }
+
+/* Phần thân card — mọi thẻ con TRỪ summary đều nhận padding đồng bộ. */
+.ttck-vtb-card > *:not(summary) {
+    padding: 14px 16px;
+}
+.ttck-vtb-card > *:not(summary):not(:last-child) {
+    border-bottom: 1px solid #f0f0f1;
+}
+
+/* URL hiển thị trong summary — font nhỏ, monospace, xám. */
+.ttck-vtb-summary-url {
+    color: #50575e;
+    font-weight: 400;
+    font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    word-break: break-all;
+}
+
+/* === Sub-<details> lồng bên trong card (Body mẫu, Response, Curl) === */
+.ttck-vtb-nested {
+    border: 1px solid #f0f0f1;
+    border-radius: 3px;
+    margin: 0;
+    background: #fafafa;
+}
+.ttck-vtb-nested > summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    list-style: none;
+    padding: 8px 12px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #50575e;
+    user-select: none;
+}
+.ttck-vtb-nested > summary::-webkit-details-marker { display: none; }
+.ttck-vtb-nested > summary::marker { content: ''; }
+.ttck-vtb-nested > summary::before {
+    content: "▸";
+    display: inline-block;
+    font-size: 10px;
+    line-height: 1;
+    transition: transform .15s;
+}
+.ttck-vtb-nested[open] > summary::before { transform: rotate(90deg); }
+.ttck-vtb-nested > *:not(summary) {
+    padding: 10px 12px;
+    border-top: 1px solid #f0f0f1;
+}
+
+/* === Form bảng nằm ngang cho phần Cấu hình === */
+.ttck-vtb-table {
+    border-collapse: collapse;
+    width: 100%;
+    max-width: 760px;
+    margin: 0;
+}
+.ttck-vtb-table th,
+.ttck-vtb-table td {
+    padding: 0;
+    border: 0;
+    vertical-align: top;
+    text-align: left;
+    background: transparent;
+}
+.ttck-vtb-table th {
+    width: 160px;
+    padding: 10px 12px 0 0;
+    font-weight: 600;
+}
+.ttck-vtb-table td {
+    padding: 6px 0;
+}
+.ttck-vtb-table label {
+    font-size: 13px;
+    color: #1d2327;
+}
+.ttck-vtb-table .regular-text {
+    width: 100%;
+    max-width: 360px;
+}
+.ttck-vtb-required {
+    color: #b32d2e;
+    margin-left: 3px;
+    font-weight: 600;
+}
+.ttck-vtb-required-bar {
+    /* Viền trái xanh đánh dấu required thay cho dấu * — gọn và không bị lệch dòng. */
+    border-left: 3px solid #2271b1;
+    padding-left: 6px;
+}
+.ttck-vtb-small {
+    display: block;
+    color: #646970;
+    font-size: 11px;
+    margin-top: 4px;
+    line-height: 1.4;
+}
+.ttck-vtb-status-ok {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #1a7f37;
+    font-size: 12px;
+    font-weight: 500;
+    margin-right: 8px;
+}
+.ttck-vtb-status-ok::before {
+    content: "●";
+    color: #1a7f37;
+    font-size: 10px;
+}
+.ttck-vtb-inline-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #50575e;
+}
+.ttck-vtb-inline-toggle input[type="checkbox"] {
+    margin: 0;
+}
+.ttck-vtb-conditional {
+    display: none;
+    margin-top: 6px;
+    max-width: 360px;
+}
+
+/* === Form test nằm ngang cho phần Test trực tiếp === */
+.ttck-vtb-test-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    margin: 0;
+}
+.ttck-vtb-test-form > label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    color: #50575e;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    font-weight: 500;
+}
+.ttck-vtb-test-form input,
+.ttck-vtb-test-form select {
+    min-width: 140px;
+    padding: 4px 8px;
+    font-size: 13px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: #1d2327;
+    font-weight: 400;
+}
+.ttck-vtb-test-form .ttck-vtb-wide { min-width: 200px; }
+.ttck-vtb-test-form .ttck-vtb-narrow { min-width: 100px; max-width: 120px; }
+
+/* === Action row (nút + hint) === */
+.ttck-vtb-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin: 12px 0 0;
+    padding-top: 10px;
+    border-top: 1px dashed #f0f0f1;
+}
+.ttck-vtb-hint {
+    color: #646970;
+    font-size: 12px;
+    font-style: italic;
+}
+
+/* === Code blocks (response, curl, body mẫu) === */
+.ttck-vtb-pre {
+    background: #1d2327;
+    color: #f0f0f1;
+    padding: 10px 12px;
+    border-radius: 4px;
+    max-height: 320px;
+    overflow: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 8px 0 0;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.ttck-vtb-pre-meta {
+    color: #646970;
+    font-size: 12px;
+    margin: 0 0 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+}
+.ttck-vtb-pre-meta code {
+    background: #f0f0f1;
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: #1d2327;
+}
+.ttck-vtb-pre-meta-ok { color: #1a7f37; font-weight: 600; }
+.ttck-vtb-pre-meta-err { color: #b32d2e; font-weight: 600; }
+
+.ttck-vtb-body-sample {
+    background: #fff;
+    padding: 8px 10px;
+    border-radius: 3px;
+    overflow: auto;
+    font-size: 12px;
+    max-height: 200px;
+    margin: 0;
+    font-family: ui-monospace, monospace;
+    border: 1px solid #f0f0f1;
+}
+.ttck-vtb-body-sample code {
+    font-family: inherit;
+}
+.ttck-vtb-curl-preview {
+    display: block;
+    width: 100%;
+    min-height: 160px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: #1d2327;
+    color: #f0f0f1;
+    border: 0;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin: 0;
+    resize: vertical;
+}
+
+/* === Save button row === */
+.ttck-vtb-save-bar {
+    margin: 12px 0 4px;
+    padding-top: 10px;
+    border-top: 1px dashed #f0f0f1;
+}
+
+/* === Notice box === */
+.ttck-vtb-notice {
+    margin: 0 0 12px;
+}
