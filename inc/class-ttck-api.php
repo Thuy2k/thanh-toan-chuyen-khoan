@@ -158,18 +158,29 @@ class TTCK_API
 	/**
 	 * Nội dung chuyển khoản cho QR động của POS:
 	 *
-	 *     TT QR cho CT TGS - <tên shop>
+	 *     <mã phiếu bán chính> - <tên shop>
 	 *
-	 * KHÔNG kèm mã phiếu: nội dung ngắn để ngân hàng không cắt bớt (nhiều app
-	 * chỉ hiện/gửi được ~25 ký tự), và tên shop đứng ngay đầu để nhân viên
-	 * nhận diện được dù bị cắt. Đối soát khoản thu vẫn làm thủ công theo số
-	 * tiền + thời điểm (staff bấm "Đã thanh toán"), không dựa vào nội dung CK.
+	 * VD: "18008B35A89 - TGS LYTHUONGKIET2". Luôn là mã phiếu bán CHÍNH (sale
+	 * ledger đang mở), KHÔNG phải mã phiếu tách hàng khuyến mãi (bill Z) — bên
+	 * gọi (`TGS_POS_Ajax_Order::save_order()`) truyền `$sale_code` của phiếu
+	 * chính vào `bill_code`, dùng chung cho cả 3 luồng ra QR: bán một hình
+	 * thức, "Đa hình thức thanh toán" (khi có dòng quét mã), và "Hoàn hàng kết
+	 * hợp đổi trả" (QR của đơn bán mới) — cả ba đều đi qua đúng một chỗ tạo QR
+	 * này nên không cần sửa riêng từng nơi.
 	 *
-	 * Giữ tham số $bill_code để tương thích chữ ký cũ — không còn dùng.
+	 * Không có bill_code (hiếm, ví dụ preview chưa gắn phiếu): rơi về chỉ tên
+	 * shop, không bịa mã phiếu.
 	 */
 	public static function build_transfer_content($bill_code = '', $blog_id = 0)
 	{
-		return 'TT QR cho CT TGS - ' . self::shop_display_name($blog_id);
+		$bill_code = trim((string) $bill_code);
+		$shop_name = self::shop_display_name($blog_id);
+
+		if ($bill_code === '') {
+			return $shop_name;
+		}
+
+		return $bill_code . ' - ' . $shop_name;
 	}
 
 	/**

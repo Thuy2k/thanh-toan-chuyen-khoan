@@ -159,10 +159,8 @@ class TTCK_Payments
 
 		/*
 		 * Nội dung chuyển khoản:
-		 *  - Có bill_code (đơn từ POS, dù nội dung không còn in mã phiếu — cột
-		 *    bill_code vẫn lưu để tra cứu/đối soát nội bộ): nội dung ngắn gọn
-		 *    "TT QR cho CT TGS - <tên shop>" do TTCK_API dựng, ưu tiên nhận diện
-		 *    cửa hàng thay vì mã phiếu (nhiều app ngân hàng cắt nội dung dài).
+		 *  - Có bill_code (đơn từ POS): "<mã phiếu bán chính> - <tên shop>" do
+		 *    TTCK_API::build_transfer_content() dựng — xem chú thích ở đó.
 		 *  - Không có bill_code: giữ hành vi cũ (nội dung = <tiền tố>ID) để app
 		 *    ngân hàng / Telegram tự bóc tách và xác nhận.
 		 */
