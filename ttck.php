@@ -182,6 +182,37 @@ class TTCKPayment
 				),
 			));
 		}
+
+		/*
+		 * Tab "Quản lý giao dịch thanh toán" — bảng giao dịch VietinBank với 12
+		 * cột sticky. Chỉ nạp khi mở trang này.
+		 */
+		if ('ttck-vietinbank-transactions' === $page) {
+			wp_enqueue_style(
+				'ttck-vietinbank-transactions',
+				TTCK_URL . 'assets/css/ttck-vietinbank-transactions.css',
+				array(),
+				'2.0.0'
+			);
+			wp_enqueue_script(
+				'ttck-vietinbank-transactions',
+				TTCK_URL . 'assets/js/ttck-vietinbank-transactions.js',
+				array('jquery'),
+				'2.0.0',
+				true
+			);
+			wp_localize_script('ttck-vietinbank-transactions', 'TTCK_VTX', array(
+				'ajaxUrl' => admin_url('admin-ajax.php'),
+				'nonce'   => wp_create_nonce('ttck_vietinbank_list'),
+				'i18n'    => array(
+					'searching'    => 'Đang tải…',
+					'empty'        => 'Không có giao dịch nào trong khoảng này.',
+					'found'        => 'Tìm thấy',
+					'transactions' => 'giao dịch',
+					'detail'       => 'Chi tiết',
+				),
+			));
+		}
 	}
 
 	/* ---------------------------------------------------------------------

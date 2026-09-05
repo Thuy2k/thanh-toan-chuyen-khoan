@@ -48,6 +48,110 @@ class TTCK_VietinBank_API
 	const DEFAULT_LANGUAGE     = 'vi';
 	const DEFAULT_TIMEOUT      = 30;
 
+	/*
+	 * Token cache — shared key cho MỌI consumer (admin test tab + tgs_pos
+	 * polling). Lưu dạng mảng để có expires_at cho auto-refresh.
+	 *
+	 *   [
+	 *     'access_token' => 'eyJ...',
+	 *     'expires_at'   => 1725600000,   // unix timestamp
+	 *     'saved_at'    => 1725596400,
+	 *   ]
+	 *
+	 * TTL transient = 50 phút < thời gian expire thực của VietinBank (thường
+	 * 1 giờ) → khi transient hết, tự login lại.  Nhưng để tránh edge-case
+	 * khi transient còn mà token thật đã expired, get_token() check expires_at
+	 * trước khi dùng.
+	 */
+	const TOKEN_TRANSIENT = 'ttck_vtb_token';
+	const TOKEN_TTL       = 50 * 60;
+	const TOKEN_REFRESH_BEFORE = 5 * 60;  // refresh sớm 5 phút trước khi hết hạn
+
+	/**
+	 * Lấy access_token còn hạn — tự login lại khi:
+	 *   - Chưa có token trong cache.
+	 *   - Token hết hạn hoặc sắp hết hạn (còn < TOKEN_REFRESH_BEFORE giây).
+	 *
+	 * @param  array $settings 5 key config (client_id, signature, username,
+	 *                       password_hash, merchant_id) — lấy từ wp_options['ttck'].
+	 * @return string|WP_Error Token string nếu OK, WP_Error nếu lỗi.
+	 */
+	public static function get_token($settings)
+	{
+		$cached = get_transient(self::TOKEN_TRANSIENT);
+		if (is_array($cached) && !empty($cached['access_token'])) {
+			$expires_at = isset($cached['expires_at']) ? (int) $cached['expires_at'] : 0;
+			/*
+			 * Còn hạn + còn "dư" ít nhất TOKEN_REFRESH_BEFORE giây → dùng luôn.
+			 * Nếu expires_at <= 0 (login cũ không lưu expires_at) → vẫn dùng,
+			 * để tương thích với phiên login trước khi update code.
+			 */
+			if ($expires_at <= 0 || $expires_at > time() + self::TOKEN_REFRESH_BEFORE) {
+				return $cached['access_token'];
+			}
+		}
+
+		// Cache miss hoặc sắp hết hạn → login mới
+		if (empty($settings['vietinbank_client_id']) || empty($settings['vietinbank_signature'])
+			|| empty($settings['vietinbank_username']) || empty($settings['vietinbank_password_hash'])) {
+			return new WP_Error('vtb_no_config', 'Chưa cấu hình VietinBank.');
+		}
+
+		$api = new self();
+		$login = $api->login([
+			'client_id'     => $settings['vietinbank_client_id'],
+			'signature'     => $settings['vietinbank_signature'],
+			'username'      => $settings['vietinbank_username'],
+			'password_hash' => $settings['vietinbank_password_hash'],
+			'language'      => self::DEFAULT_LANGUAGE,
+		]);
+
+		if (!$login['ok'] || empty($login['data'])) {
+			return new WP_Error('vtb_login_fail', 'VietinBank login fail: ' . ($login['error'] ?? 'unknown'));
+		}
+
+		$token = '';
+		foreach (['accessToken', 'access_token', 'token', 'id_token', 'jsonWebToken'] as $k) {
+			if (!empty($login['data'][$k]) && is_string($login['data'][$k])) {
+				$token = $login['data'][$k];
+				break;
+			}
+		}
+		if ($token === '') {
+			return new WP_Error('vtb_no_token', 'VietinBank login trả 200 nhưng không có access token.');
+		}
+
+		// Tính expires_at từ response (nếu có). Fallback 1 giờ.
+		$expires_in = 0;
+		if (is_array($login['data'])) {
+			foreach (['expiresIn', 'expires_in', 'exp'] as $k) {
+				if (!empty($login['data'][$k])) {
+					$expires_in = (int) $login['data'][$k];
+					break;
+				}
+			}
+		}
+		if ($expires_in <= 0) {
+			$expires_in = 3600;
+		}
+
+		set_transient(self::TOKEN_TRANSIENT, [
+			'access_token' => $token,
+			'expires_at'   => time() + $expires_in,
+			'saved_at'     => time(),
+		], self::TOKEN_TTL);
+
+		return $token;
+	}
+
+	/**
+	 * Xoá token cache — gọi khi nhận 401 từ API để lần sau auto-login lại.
+	 */
+	public static function clear_token()
+	{
+		delete_transient(self::TOKEN_TRANSIENT);
+	}
+
 	/**
 	 * POST /vtb/public/map/api/ma/no-auth/login
 	 *

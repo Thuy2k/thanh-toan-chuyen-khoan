@@ -50,6 +50,7 @@ class TTCK_Admin_Page
 		 */
 		add_action('wp_ajax_ttck_test_vietinbank_login', array($this, 'ajax_test_vietinbank_login'));
 		add_action('wp_ajax_ttck_test_vietinbank_search', array($this, 'ajax_test_vietinbank_search'));
+		add_action('wp_ajax_ttck_vietinbank_list_transactions', array($this, 'ajax_vietinbank_list_transactions'));
 	}
 
 	public function register_menu()
@@ -111,6 +112,22 @@ class TTCK_Admin_Page
 			__('VietinBank API', 'thanh-toan-chuyen-khoan'),
 			self::export_capability(),
 			'ttck-vietinbank',
+			array($this, 'render_page')
+		);
+
+		/*
+		 * Tab "Quản lý giao dịch thanh toán" — bảng giao dịch VietinBank MAP
+		 * Merchant Portal với đầy đủ 12 cột (thời gian, số tiền, mã GD, khách
+		 * hàng, số TK, mã VA, chi nhánh, điểm bán, phương thức, nội dung GD,
+		 * trạng thái, chi tiết). Lấy dữ liệu trực tiếp từ API search, không
+		 * lưu DB — vì dữ liệu có hạn 5 phút từ VietinBank.
+		 */
+		add_submenu_page(
+			self::MENU_SLUG,
+			__('Quản lý giao dịch thanh toán', 'thanh-toan-chuyen-khoan'),
+			__('Quản lý giao dịch thanh toán', 'thanh-toan-chuyen-khoan'),
+			self::export_capability(),
+			'ttck-vietinbank-transactions',
 			array($this, 'render_page')
 		);
 	}
@@ -667,8 +684,8 @@ class TTCK_Admin_Page
 
 		/*
 		 * Rút accessToken ra — thử nhiều tên key phổ biến vì schema VietinBank
-		 * có thể đổi theo phiên. Tìm được thì cache vào transient 1 giờ để
-		 * test search khỏi login lại.
+		 * có thể đổi theo phiên. Tìm được thì cache vào TRANSIENT_TOKEN với
+		 * expires_at để helper get_token() tự refresh khi sắp hết hạn.
 		 */
 		$access_token = '';
 		if (is_array($resp['data'])) {
@@ -682,7 +699,23 @@ class TTCK_Admin_Page
 
 		$token_preview = '';
 		if ($access_token !== '') {
-			set_transient('ttck_vtb_access_token', $access_token, HOUR_IN_SECONDS);
+			$expires_in = 0;
+			if (is_array($resp['data'])) {
+				foreach (array('expiresIn', 'expires_in', 'exp') as $k) {
+					if (!empty($resp['data'][$k])) {
+						$expires_in = (int) $resp['data'][$k];
+						break;
+					}
+				}
+			}
+			if ($expires_in <= 0) {
+				$expires_in = 3600;
+			}
+			set_transient(TTCK_VietinBank_API::TOKEN_TRANSIENT, [
+				'access_token' => $access_token,
+				'expires_at'   => time() + $expires_in,
+				'saved_at'     => time(),
+			], TTCK_VietinBank_API::TOKEN_TTL);
 			$token_preview = substr($access_token, 0, 40) . '…';
 		}
 
@@ -716,9 +749,13 @@ class TTCK_Admin_Page
 			}
 		}
 
-		$token = get_transient('ttck_vtb_access_token');
-		if (!$token) {
-			wp_send_json_error(array('message' => 'Chưa có token. Bấm "Test login" trước để lấy Bearer token.'));
+		/*
+		 * Lấy token tự động refresh — helper xử lý cache miss + sắp hết hạn.
+		 * Nếu có 401 → xoá cache + gọi lại search 1 lần duy nhất.
+		 */
+		$token = TTCK_VietinBank_API::get_token($settings);
+		if (is_wp_error($token)) {
+			wp_send_json_error(array('message' => $token->get_error_message()));
 		}
 
 		$body = wp_unslash($_POST['body'] ?? array());
@@ -729,7 +766,7 @@ class TTCK_Admin_Page
 		}
 
 		$api  = new TTCK_VietinBank_API();
-		$resp = $api->search_transactions(array(
+		$args = array(
 			'token'       => $token,
 			'client_id'   => $settings['vietinbank_client_id'],
 			'merchant_id' => $settings['vietinbank_merchant_id'],
@@ -740,7 +777,21 @@ class TTCK_Admin_Page
 			'size'        => max(1, min(200, intval($body['size'] ?? 20))),
 			'sort'        => sanitize_text_field($body['sort'] ?? 'txnDate,desc'),
 			'language'    => sanitize_text_field($body['language'] ?? TTCK_VietinBank_API::DEFAULT_LANGUAGE),
-		));
+		);
+		$resp = $api->search_transactions($args);
+
+		/*
+		 * Retry-on-401: nếu cached token thực sự đã expired (VietinBank TTL
+		 * không khớp expires_at) → xoá cache, login lại, gọi lại search.
+		 */
+		if (!$resp['ok'] && (int) $resp['status'] === 401) {
+			TTCK_VietinBank_API::clear_token();
+			$token = TTCK_VietinBank_API::get_token($settings);
+			if (!is_wp_error($token)) {
+				$args['token'] = $token;
+				$resp = $api->search_transactions($args);
+			}
+		}
 
 		if (!$resp['ok']) {
 			wp_send_json_error(array(
@@ -754,6 +805,266 @@ class TTCK_Admin_Page
 			'response' => $resp,
 			'token_preview' => substr($token, 0, 40) . '…',
 		));
+	}
+
+	/**
+	 * AJAX: lấy danh sách giao dịch VietinBank cho tab "Quản lý giao dịch".
+	 *
+	 * Input: start_date, end_date (dd/MM/yyyy), page, size.
+	 * Output: danh sách GD + phân trang.
+	 *
+	 * KHÔNG cache DB — dữ liệu lấy thẳng từ API VietinBank. Token cache dùng
+	 * chung với tab VietinBank API (transient `ttck_vtb_token`, TTL 1h).
+	 */
+	public function ajax_vietinbank_list_transactions()
+	{
+		check_ajax_referer('ttck_vietinbank_list', 'nonce');
+
+		if (!$this->can_export()) {
+			wp_send_json_error(['message' => 'Không có quyền.'], 403);
+		}
+
+		$start = isset($_POST['start_date']) ? sanitize_text_field(wp_unslash($_POST['start_date'])) : '';
+		$end   = isset($_POST['end_date'])   ? sanitize_text_field(wp_unslash($_POST['end_date']))   : '';
+		$page  = isset($_POST['page']) ? max(0, intval($_POST['page'])) : 0;
+		$size  = isset($_POST['size']) ? max(1, min(100, intval($_POST['size']))) : 20;
+
+		// Chấp nhận cả dd/MM/yyyy (form cũ / API caller) và yyyy-MM-dd (HTML5 date input) → chuẩn hoá về dd/MM/yyyy.
+		$start = $this->normalize_date_input($start);
+		$end   = $this->normalize_date_input($end);
+
+		if ($start === '' || $end === '') {
+			wp_send_json_error(['message' => 'Ngày phải theo định dạng dd/MM/yyyy hoặc yyyy-MM-dd.']);
+		}
+		if (strtotime($start) > strtotime($end)) {
+			wp_send_json_error(['message' => '"Từ ngày" phải nhỏ hơn hoặc bằng "Đến ngày".']);
+		}
+
+		$s = TTCKPayment::get_settings();
+		foreach (['vietinbank_client_id', 'vietinbank_signature', 'vietinbank_password_hash', 'vietinbank_merchant_id'] as $required) {
+			if (empty($s[$required])) {
+				wp_send_json_error(['message' => 'Chưa cấu hình VietinBank (' . $required . ') vào tab VietinBank API.']);
+			}
+		}
+
+		/*
+		 * Token tự động refresh qua helper:
+		 *   - Cache miss → login
+		 *   - Sắp hết hạn (< TOKEN_REFRESH_BEFORE giây) → login lại
+		 *   - Vẫn fail → retry-on-401 bên dưới.
+		 */
+		$token = TTCK_VietinBank_API::get_token($s);
+		if (is_wp_error($token)) {
+			wp_send_json_error(['message' => $token->get_error_message()]);
+		}
+
+		$api = new TTCK_VietinBank_API();
+		$args = [
+			'token'       => $token,
+			'client_id'   => $s['vietinbank_client_id'],
+			'merchant_id' => $s['vietinbank_merchant_id'],
+			'start_date'  => $start,
+			'end_date'    => $end,
+			'page'        => $page,
+			'size'        => $size,
+			'sort'        => 'tranTime,desc',
+			'language'    => TTCK_VietinBank_API::DEFAULT_LANGUAGE,
+		];
+		$resp = $api->search_transactions($args);
+
+		/*
+		 * Retry-on-401: nếu cached token thực sự expired (expires_at sai
+		 * hoặc VietinBank TTL ngắn hơn) → xoá + login lại + gọi lại search.
+		 */
+		if (!$resp['ok'] && (int) $resp['status'] === 401) {
+			TTCK_VietinBank_API::clear_token();
+			$token = TTCK_VietinBank_API::get_token($s);
+			if (!is_wp_error($token)) {
+				$args['token'] = $token;
+				$resp = $api->search_transactions($args);
+			}
+		}
+
+		if (!$resp['ok']) {
+			wp_send_json_error(['message' => 'VietinBank search fail: ' . ($resp['error'] ?? 'unknown')]);
+		}
+
+		$list = $this->extract_transaction_list($resp['data'] ?? null);
+
+		wp_send_json_success([
+			'message' => 'Lấy danh sách giao dịch thành công.',
+			'rows'    => $list,
+			'total'   => isset($resp['data']['total']) ? intval($resp['data']['total']) : count($list),
+			'page'    => $page,
+			'size'    => $size,
+		]);
+	}
+
+/**
+	 * Rút mảng giao dịch từ response VietinBank MAP — API không chuẩn hoá tên
+	 * key chứa list (đã thấy `list`, `content`, `data`, và các key khác tuỳ
+	 * phiên; lại còn lồng 2 lớp `{code, message, data: {…, list: […]}}`).
+	 * Thử các key phổ biến ở mọi cấp trước (fast path), nếu trượt thì quét
+	 * toàn bộ response tìm array of object có field đặc trưng của giao dịch.
+	 *
+	 * @param mixed $data Body JSON đã decode từ VietinBank.
+	 * @return array      Mảng giao dịch (rỗng nếu không tìm thấy).
+	 */
+	private function extract_transaction_list($data)
+	{
+		if (!is_array($data)) {
+			return [];
+		}
+
+		$preferred = ['list', 'content', 'data', 'transactions', 'paymentTransactions', 'items', 'records', 'rows', 'payment_transactions'];
+		$signatures = ['tranTime', 'transactionNumber', 'reqCardName', 'virtualAccount', 'transactionDescription'];
+
+		// BFS qua các object lồng nhau, thử preferred key ở mỗi cấp.
+		$queue = [$data];
+		while ($queue) {
+			$node = array_shift($queue);
+			if (!is_array($node)) {
+				continue;
+			}
+			foreach ($preferred as $k) {
+				if (!empty($node[$k]) && is_array($node[$k]) && isset($node[$k][0]) && is_array($node[$k][0])) {
+					return $node[$k];
+				}
+			}
+			foreach ($node as $v) {
+				if (is_array($v) && !empty($v) && array_keys($v) !== range(0, count($v) - 1)) {
+					$queue[] = $v;
+				}
+			}
+		}
+
+		// Fallback toàn response: tìm array of object có field signature.
+		$found = null;
+		$this->find_transaction_list_recursive($data, $signatures, $found);
+		return $found ?? [];
+	}
+
+	/**
+	 * Chuẩn hoá input ngày về định dạng dd/MM/yyyy (chuẩn VietinBank yêu cầu).
+	 * Chấp nhận: dd/MM/yyyy | yyyy-MM-dd | yyyy/MM/dd. Trả về '' nếu không hợp lệ.
+	 */
+	private function normalize_date_input($raw)
+	{
+		$raw = trim((string) $raw);
+		if ($raw === '') {
+			return '';
+		}
+		if (preg_match('/^(\d{2})\/(\d{2})\/(\d{4})$/', $raw, $m)) {
+			if (checkdate((int) $m[2], (int) $m[1], (int) $m[3])) {
+				return $m[1] . '/' . $m[2] . '/' . $m[3];
+			}
+			return '';
+		}
+		if (preg_match('/^(\d{4})[-\/](\d{2})[-\/](\d{2})$/', $raw, $m)) {
+			if (checkdate((int) $m[2], (int) $m[3], (int) $m[1])) {
+				return $m[3] . '/' . $m[2] . '/' . $m[1];
+			}
+			return '';
+		}
+		return '';
+	}
+
+	/**
+	 * Đệ quy tìm mảng giao dịch: first match array of object có ≥1 field signature.
+	 *
+	 * @param mixed $node       Node hiện tại (sẽ bị thay đổi nếu là reference, an toàn vì dùng biến cục bộ).
+	 * @param array $signatures Danh sách field đặc trưng của giao dịch.
+	 * @param array|null &$out  Lưu kết quả khi tìm thấy.
+	 */
+	private function find_transaction_list_recursive($node, array $signatures, &$out)
+	{
+		if ($out !== null || !is_array($node)) {
+			return;
+		}
+		// Nếu là list-of-assoc-arrays có field signature → match.
+		if (isset($node[0]) && is_array($node[0])) {
+			foreach ($signatures as $sig) {
+				if (array_key_exists($sig, $node[0])) {
+					$out = $node;
+					return;
+				}
+			}
+			return;
+		}
+		foreach ($node as $v) {
+			if ($out !== null) {
+				return;
+			}
+			if (is_array($v)) {
+				$this->find_transaction_list_recursive($v, $signatures, $out);
+			}
+		}
+	}
+
+	/**
+	 * Render tab "Quản lý giao dịch thanh toán" — bảng giao dịch VietinBank
+	 * MAP với 12 cột (thời gian, số tiền, mã GD, khách hàng, số TK, mã VA,
+	 * chi nhánh, điểm bán, phương thức, nội dung, trạng thái, chi tiết).
+	 * Tải qua AJAX `ttck_vietinbank_list_transactions` — không cache DB.
+	 */
+	private function render_vietinbank_transactions_tab()
+	{
+		?>
+		<div class="ttck-vtx-wrap">
+			<h2><?php esc_html_e('Quản lý giao dịch thanh toán', 'thanh-toan-chuyen-khoan'); ?></h2>
+			<p class="description">
+				<?php esc_html_e('Tra cứu giao dịch VietinBank MAP Merchant Portal theo khoảng ngày. Dữ liệu lấy trực tiếp từ API VietinBank, không lưu DB.', 'thanh-toan-chuyen-khoan'); ?>
+			</p>
+
+			<form class="ttck-vtx-filter" data-module="vietinbank-transactions">
+				<label>
+					<span><?php esc_html_e('Từ ngày', 'thanh-toan-chuyen-khoan'); ?></span>
+					<input type="date" name="start_date" id="ttck-vtx-start" class="ttck-vtx-date" value="<?php echo esc_attr(date('Y-m-d', strtotime('-7 days'))); ?>" max="<?php echo esc_attr(date('Y-m-d')); ?>" required>
+				</label>
+				<label>
+					<span><?php esc_html_e('Đến ngày', 'thanh-toan-chuyen-khoan'); ?></span>
+					<input type="date" name="end_date" id="ttck-vtx-end" class="ttck-vtx-date" value="<?php echo esc_attr(date('Y-m-d')); ?>" max="<?php echo esc_attr(date('Y-m-d')); ?>" required>
+				</label>
+				<label>
+					<span><?php esc_html_e('Page', 'thanh-toan-chuyen-khoan'); ?></span>
+					<input type="number" name="page" min="0" value="0" class="ttck-vtx-page">
+				</label>
+				<label>
+					<span><?php esc_html_e('Size', 'thanh-toan-chuyen-khoan'); ?></span>
+					<input type="number" name="size" min="1" max="100" value="20" class="ttck-vtx-size">
+				</label>
+				<button type="submit" class="button button-primary ttck-vtx-search">
+					<?php esc_html_e('Tìm kiếm', 'thanh-toan-chuyen-khoan'); ?>
+				</button>
+			</form>
+
+			<div class="ttck-vtx-summary tgs-ba-muted" hidden></div>
+
+			<div class="ttck-vtx-table-wrap">
+				<table class="ttck-vtx-table">
+					<thead>
+						<tr>
+							<th class="ttck-vtx-col-time ttck-vtx-sticky-left"><?php esc_html_e('Thời gian giao dịch', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-amount"><?php esc_html_e('Số tiền', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-code"><?php esc_html_e('Mã giao dịch', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-customer"><?php esc_html_e('Thông tin khách hàng', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-account"><?php esc_html_e('Số TK / Số thẻ', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-va"><?php esc_html_e('Mã định danh tài khoản', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-branch"><?php esc_html_e('Tên Chi nhánh', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-terminal"><?php esc_html_e('Tên Điểm bán', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-method"><?php esc_html_e('Phương thức thanh toán', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-desc"><?php esc_html_e('Nội dung giao dịch', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-status ttck-vtx-sticky-right"><?php esc_html_e('Trạng thái', 'thanh-toan-chuyen-khoan'); ?></th>
+							<th class="ttck-vtx-col-action ttck-vtx-sticky-right"><?php esc_html_e('Chi tiết', 'thanh-toan-chuyen-khoan'); ?></th>
+						</tr>
+					</thead>
+					<tbody class="ttck-vtx-body">
+						<tr><td colspan="12" class="ttck-vtx-empty"><?php esc_html_e('Bấm "Tìm kiếm" để tải danh sách giao dịch.', 'thanh-toan-chuyen-khoan'); ?></td></tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+		<?php
 	}
 
 	/* ---------------------------------------------------------------------
@@ -891,6 +1202,9 @@ class TTCK_Admin_Page
 			case 'ttck-vietinbank':
 				$this->render_vietinbank_tab();
 				break;
+			case 'ttck-vietinbank-transactions':
+				$this->render_vietinbank_transactions_tab();
+				break;
 			default:
 				$this->render_settings_tab();
 				break;
@@ -911,8 +1225,9 @@ class TTCK_Admin_Page
 
 		// Tab chốt cấu hình chỉ hiện cho người được phép — xem export_capability()
 		if ($this->can_export()) {
-			$tabs['ttck-export']     = __('Xuất cấu hình', 'thanh-toan-chuyen-khoan');
-			$tabs['ttck-vietinbank'] = __('VietinBank API', 'thanh-toan-chuyen-khoan');
+			$tabs['ttck-export']                  = __('Xuất cấu hình', 'thanh-toan-chuyen-khoan');
+			$tabs['ttck-vietinbank']              = __('VietinBank API', 'thanh-toan-chuyen-khoan');
+			$tabs['ttck-vietinbank-transactions'] = __('Quản lý giao dịch thanh toán', 'thanh-toan-chuyen-khoan');
 		}
 
 		echo '<h2 class="nav-tab-wrapper">';
