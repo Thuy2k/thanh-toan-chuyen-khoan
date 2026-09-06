@@ -61,6 +61,46 @@
     color: #1d2327;
 }
 
+/* === Pagination === */
+
+.ttck-vtx-pagination {
+    margin: 4px 0 10px;
+}
+
+.ttck-vtx-pagination-inner {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+}
+
+.ttck-vtx-page-btn {
+    min-width: 32px;
+    height: 30px;
+    padding: 0 8px;
+    line-height: 28px;
+    font-size: 13px;
+    text-align: center;
+    cursor: pointer;
+}
+
+.ttck-vtx-page-btn.disabled {
+    cursor: not-allowed;
+    opacity: .5;
+    color: #a7aaad;
+}
+
+.ttck-vtx-page-btn.button-primary {
+    cursor: default;
+}
+
+.ttck-vtx-page-ellipsis {
+    color: #50575e;
+    padding: 0 4px;
+    font-size: 13px;
+    user-select: none;
+}
+
 /* === Table === */
 
 .ttck-vtx-table-wrap {

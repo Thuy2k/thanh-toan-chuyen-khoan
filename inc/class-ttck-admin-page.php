@@ -1026,19 +1026,23 @@ class TTCK_Admin_Page
 					<input type="date" name="end_date" id="ttck-vtx-end" class="ttck-vtx-date" value="<?php echo esc_attr(date('Y-m-d')); ?>" max="<?php echo esc_attr(date('Y-m-d')); ?>" required>
 				</label>
 				<label>
-					<span><?php esc_html_e('Page', 'thanh-toan-chuyen-khoan'); ?></span>
-					<input type="number" name="page" min="0" value="0" class="ttck-vtx-page">
+					<span><?php esc_html_e('Số dòng / trang', 'thanh-toan-chuyen-khoan'); ?></span>
+					<select name="size" class="ttck-vtx-size">
+						<option value="10">10</option>
+						<option value="20" selected>20</option>
+						<option value="50">50</option>
+						<option value="100">100</option>
+					</select>
 				</label>
-				<label>
-					<span><?php esc_html_e('Size', 'thanh-toan-chuyen-khoan'); ?></span>
-					<input type="number" name="size" min="1" max="100" value="20" class="ttck-vtx-size">
-				</label>
+				<input type="hidden" name="page" value="0" class="ttck-vtx-page">
 				<button type="submit" class="button button-primary ttck-vtx-search">
 					<?php esc_html_e('Tìm kiếm', 'thanh-toan-chuyen-khoan'); ?>
 				</button>
 			</form>
 
 			<div class="ttck-vtx-summary tgs-ba-muted" hidden></div>
+
+			<nav class="ttck-vtx-pagination" hidden aria-label="<?php esc_attr_e('Phân trang', 'thanh-toan-chuyen-khoan'); ?>"></nav>
 
 			<div class="ttck-vtx-table-wrap">
 				<table class="ttck-vtx-table">
