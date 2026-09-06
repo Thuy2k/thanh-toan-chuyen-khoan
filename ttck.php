@@ -503,6 +503,15 @@ class TTCKPayment
 
 		if (!empty($jsonBody->data)) {
 			foreach ($jsonBody->data as $transaction) {
+				// Một số app ngân hàng gửi cả giao dịch báo nợ/hoàn hoặc bản ghi
+				// chưa thành công. Chỉ bỏ qua khi payload có field trạng thái/chiều
+				// rõ ràng là không phải ghi có; payload cũ không có các field này
+				// vẫn tương thích với contract hiện tại.
+				if (!$this->is_successful_credit_transaction($transaction)) {
+					$result['msg'][] = 'Ignored non-credit or unsuccessful transaction';
+					continue;
+				}
+
 				$result['_ok'] = 1;
 
 				$des = $transaction->description;
@@ -613,6 +622,25 @@ class TTCKPayment
 		$result['msg'] = join('. ', $result['msg']);
 
 		wp_send_json($result);
+	}
+
+	private function is_successful_credit_transaction($transaction)
+	{
+		if (!is_object($transaction) || (float) ($transaction->amount ?? 0) <= 0) {
+			return false;
+		}
+
+		$status = strtoupper(trim((string) ($transaction->status ?? $transaction->responseCode ?? '')));
+		if ($status !== '' && !in_array($status, array('00', 'SUCCESS', 'SUCCESSFUL', 'COMPLETED', 'PAID'), true)) {
+			return false;
+		}
+
+		$direction = strtoupper(trim((string) ($transaction->direction ?? $transaction->transactionType ?? $transaction->type ?? '')));
+		if ($direction !== '' && !in_array($direction, array('CREDIT', 'IN', 'INBOUND', 'CR', 'C'), true)) {
+			return false;
+		}
+
+		return true;
 	}
 
 	private function notify_telegram_group($message)

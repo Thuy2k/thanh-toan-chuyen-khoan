@@ -213,7 +213,20 @@ class TTCK_VietinBank_API
 			                . 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15',
 		);
 
-		return $this->post_json(self::LOGIN_URL, $body, $headers, (int) $args['timeout']);
+		// [TGS-VTB] DEBUG: log khi bắt đầu login
+		error_log('[TGS-VTB] API CALL login | username=' . $args['username'] . ' client_id=' . $args['client_id']);
+		$t0 = microtime(true);
+		$resp = $this->post_json(self::LOGIN_URL, $body, $headers, (int) $args['timeout']);
+		// [TGS-VTB] DEBUG: log kết quả + timing
+		error_log(sprintf(
+			'[TGS-VTB] API RESP login | ok=%s status=%d elapsed=%ss token_preview=%s',
+			$resp['ok'] ? 'true' : 'false',
+			(int) $resp['status'],
+			number_format(microtime(true) - $t0, 3, '.', ''),
+			isset($resp['data']['accessToken']) ? substr($resp['data']['accessToken'], 0, 12) . '…' : '(none)'
+		));
+
+		return $resp;
 	}
 
 	/**
@@ -273,7 +286,33 @@ class TTCK_VietinBank_API
 			                 . 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15',
 		);
 
-		return $this->post_json($url, $body, $headers, (int) $args['timeout']);
+		// [TGS-VTB] DEBUG: log khi bắt đầu search
+		error_log(sprintf(
+			'[TGS-VTB] API CALL search_transactions | merchant_id=%s date=%s..%s page=%d size=%d sort=%s',
+			$args['merchant_id'], $args['start_date'], $args['end_date'],
+			(int) $args['page'], (int) $args['size'], $args['sort']
+		));
+		$t0 = microtime(true);
+		$resp = $this->post_json($url, $body, $headers, (int) $args['timeout']);
+		// [TGS-VTB] DEBUG: log kết quả + số rows + timing
+		$rows = 0;
+		if (is_array($resp['data'] ?? null)) {
+			foreach (['list', 'content', 'data'] as $k) {
+				if (!empty($resp['data'][$k]) && is_array($resp['data'][$k])) {
+					$rows = count($resp['data'][$k]);
+					break;
+				}
+			}
+		}
+		error_log(sprintf(
+			'[TGS-VTB] API RESP search_transactions | ok=%s status=%d rows=%d elapsed=%ss',
+			$resp['ok'] ? 'true' : 'false',
+			(int) $resp['status'],
+			$rows,
+			number_format(microtime(true) - $t0, 3, '.', '')
+		));
+
+		return $resp;
 	}
 
 	/**

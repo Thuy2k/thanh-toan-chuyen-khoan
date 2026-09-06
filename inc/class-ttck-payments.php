@@ -159,7 +159,7 @@ class TTCK_Payments
 
 		/*
 		 * Nội dung chuyển khoản:
-		 *  - Có bill_code (đơn từ POS): "<mã phiếu bán chính> - <tên shop>" do
+		 *  - Có bill_code (đơn từ POS): mã QR ngẫu nhiên theo shop do
 		 *    TTCK_API::build_transfer_content() dựng — xem chú thích ở đó.
 		 *  - Không có bill_code: giữ hành vi cũ (nội dung = <tiền tố>ID) để app
 		 *    ngân hàng / Telegram tự bóc tách và xác nhận.
