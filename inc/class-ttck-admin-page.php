@@ -368,6 +368,7 @@ class TTCK_Admin_Page
 		}
 
 		TTCKPayment::update_settings($next);
+		do_action('ttck_save_vietinbank_extra_settings', $posted);
 		$this->settings = TTCKPayment::get_settings();
 		$this->saved_message();
 	}
@@ -473,6 +474,7 @@ class TTCK_Admin_Page
 								<small class="ttck-vtb-small">Header <code>merchantId</code> — chỉ dùng cho API truy vấn.</small>
 							</td>
 						</tr>
+						<?php do_action('ttck_vietinbank_settings_rows'); ?>
 					</tbody>
 				</table>
 

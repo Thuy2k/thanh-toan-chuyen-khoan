@@ -78,6 +78,11 @@ class TTCK_VietinBank_API
 	 */
 	public static function get_token($settings)
 	{
+		$override = apply_filters('ttck_vietinbank_token_override', null, $settings);
+		if (is_wp_error($override) || (is_string($override) && $override !== '')) {
+			return $override;
+		}
+
 		$cached = get_transient(self::TOKEN_TRANSIENT);
 		if (is_array($cached) && !empty($cached['access_token'])) {
 			$expires_at = isset($cached['expires_at']) ? (int) $cached['expires_at'] : 0;
@@ -260,6 +265,11 @@ class TTCK_VietinBank_API
 			'sort'        => 'txnDate,desc',
 			'timeout'     => self::DEFAULT_TIMEOUT,
 		));
+
+		$override = apply_filters('ttck_vietinbank_search_override', null, $args);
+		if (is_array($override)) {
+			return $override;
+		}
 
 		$url = add_query_arg(array(
 			'page' => (int) $args['page'],
