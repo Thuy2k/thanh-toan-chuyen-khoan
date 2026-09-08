@@ -174,13 +174,105 @@ class TTCK_API
 	public static function build_transfer_content($bill_code = '', $blog_id = 0)
 	{
 		$bill_code = trim((string) $bill_code);
-		$shop_name = self::shop_display_name($blog_id);
 
 		if ($bill_code === '') {
-			return $shop_name;
+			return self::shop_name_slug($blog_id);
 		}
 
-		return $bill_code . ' - ' . $shop_name;
+		return self::build_qr_content($blog_id);
+	}
+
+	/**
+	 * Mã shop của site: đọc wp_blogs.tgs_site_code, không có thì CNTEST.
+	 *
+	 * Đọc thẳng bảng blogs chứ không switch_to_blog: chỉ cần một cột, mà
+	 * switch site là kéo theo cả một vòng nạp option.
+	 */
+	public static function shop_code($blog_id = 0)
+	{
+		global $wpdb;
+
+		$blog_id = (int) $blog_id ?: get_current_blog_id();
+
+		$code = '';
+		if (is_multisite() && $blog_id > 0) {
+			$code = (string) $wpdb->get_var($wpdb->prepare(
+				'SELECT tgs_site_code FROM ' . $wpdb->base_prefix . 'blogs WHERE blog_id = %d',
+				$blog_id
+			));
+		}
+
+		$code = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $code));
+
+		return $code !== '' ? $code : 'CNTEST';
+	}
+
+	/**
+	 * Tên shop rút về dạng chữ HOA liền, bỏ dấu — "Lý Thường Kiệt 2" →
+	 * "LYTHUONGKIET2".
+	 *
+	 * Nội dung chuyển khoản đi qua app ngân hàng: dấu tiếng Việt và khoảng
+	 * trắng hay bị cắt hoặc đổi khác nhau tuỳ ngân hàng, nên chuẩn hoá ngay từ
+	 * đây để nội dung nhận được luôn giống nội dung đã gửi.
+	 */
+	public static function shop_name_slug($blog_id = 0)
+	{
+		$name = self::shop_display_name($blog_id);
+		$name = function_exists('remove_accents') ? remove_accents($name) : $name;
+
+		return strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $name));
+	}
+
+	/**
+	 * 5 ký tự ngẫu nhiên cho nội dung chuyển khoản.
+	 *
+	 * BỎ O/I THEO YÊU CẦU, VÀ BỎ LUÔN 0/1: nội dung này được đọc bằng mắt trên
+	 * màn hình điện thoại rồi gõ tay khi phải đối soát thủ công. O với 0, I với
+	 * 1 nhìn gần như nhau — giữ lại là mời người ta gõ nhầm đúng vào lúc đang
+	 * dò một giao dịch không tự khớp.
+	 *
+	 * Còn 32 ký tự, 5 vị trí ⇒ ~33 triệu tổ hợp cho mỗi shop mỗi lần tạo mã.
+	 */
+	public static function random_qr_token($length = 5)
+	{
+		$alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+		$max      = strlen($alphabet) - 1;
+		$token    = '';
+
+		for ($i = 0; $i < max(1, (int) $length); $i++) {
+			$token .= $alphabet[function_exists('wp_rand') ? wp_rand(0, $max) : mt_rand(0, $max)];
+		}
+
+		return $token;
+	}
+
+	/**
+	 * NỘI DUNG CHUYỂN KHOẢN CHO QR ĐỘNG.
+	 *
+	 *     <mã shop>QR<5 ký tự ngẫu nhiên> - <TÊN SHOP>
+	 *     VD: 25624QR42AB3 - LYTHUONGKIET2
+	 *
+	 * ── VÌ SAO KHÔNG CÒN LÀ MÃ PHIẾU BÁN ────────────────────────────────
+	 *
+	 * Trước đây nội dung là "<mã phiếu bán> - <tên shop>". Mã phiếu là số chạy
+	 * tuần tự nên đoán được, và nó hiện lên sao kê của bên nhận. Yêu cầu vận
+	 * hành (09/2026) đổi sang một mã sinh ngẫu nhiên cho từng lần tạo QR.
+	 *
+	 * ── SINH ĐÚNG MỘT LẦN, RỒI LƯU ──────────────────────────────────────
+	 *
+	 * Hàm này CHỈ được gọi từ TTCK_Payments::create() — chỗ ghi cột `content`
+	 * của bản ghi thanh toán. Gọi lại ở nơi khác sẽ ra chuỗi KHÁC, và nội dung
+	 * hiện cho thu ngân sẽ lệch với nội dung nằm trong mã QR khách quét.
+	 *
+	 * Mã phiếu bán vẫn được lưu nguyên ở cột `bill_code`, nên báo cáo và đối
+	 * soát theo phiếu không mất gì.
+	 */
+	public static function build_qr_content($blog_id = 0)
+	{
+		$code = self::shop_code($blog_id) . 'QR' . self::random_qr_token(5);
+		$shop = self::shop_name_slug($blog_id);
+
+		return $shop !== '' ? $code . ' - ' . $shop : $code;
 	}
 
 	/**

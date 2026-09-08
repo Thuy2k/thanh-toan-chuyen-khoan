@@ -463,13 +463,24 @@ class TTCKPayment
 					}
 				}
 
-				// Lưới an toàn: nội dung CK kiểu POS là mã phiếu bán (không có
-				// <tiền tố>ID). Dò từng cụm chữ-số trong nội dung theo bill_code.
+				/*
+				 * Lưới an toàn cho nội dung kiểu POS (không có <tiền tố>ID).
+				 * Bóc từng cụm chữ-số rồi thử theo hai đường:
+				 *
+				 *   1. MÃ QR trong nội dung — "<mã shop>QR<5 ký tự>", dạng đang
+				 *      dùng (xem TTCK_API::build_qr_content).
+				 *   2. Mã phiếu bán — dạng CŨ, giữ lại để mấy giao dịch của
+				 *      những mã QR phát trước lần đổi này vẫn tự khớp được.
+				 */
 				if (!$payment) {
 					if (preg_match_all('/[A-Za-z0-9.]{6,}/', (string) $des, $tokens)) {
 						foreach ($tokens[0] as $token) {
 							$token = strtoupper(trim($token, '.'));
-							$payment = TTCK_Payments::get_by_bill_code($token);
+
+							$payment = TTCK_Payments::get_by_qr_code($token);
+							if (!$payment) {
+								$payment = TTCK_Payments::get_by_bill_code($token);
+							}
 							if (!$payment) {
 								$payment = TTCK_Payments::get_by_bill_code(preg_replace('/Z+$/', '', $token));
 							}

@@ -216,6 +216,43 @@ class TTCK_Payments
 	 * Ưu tiên bản còn treo (pending) và mới nhất — mã phiếu có thể xuất hiện ở
 	 * nhiều bản ghi nếu nhân viên bấm "Tạo mã mới" vài lần cho cùng một đơn.
 	 */
+	/**
+	 * Tìm yêu cầu thanh toán theo MÃ QR nằm trong nội dung chuyển khoản.
+	 *
+	 * Nội dung dạng "<mã shop>QR<5 ký tự> - <TÊN SHOP>" (xem
+	 * TTCK_API::build_qr_content). Tiền về, ngân hàng trả lại nguyên nội dung
+	 * đó; chỗ đối soát bóc từng cụm chữ-số rồi hỏi hàm này.
+	 *
+	 * PHẢI CÓ HÀM NÀY, nếu không mọi giao dịch QR của POS đều rơi vào diện
+	 * "không tìm thấy yêu cầu thanh toán" và phải xác nhận tay: đường dò cũ tìm
+	 * theo `bill_code` (mã phiếu bán), mà mã phiếu không còn xuất hiện trong
+	 * nội dung nữa.
+	 *
+	 * So khớp phần ĐẦU nội dung, không so cả chuỗi: ngân hàng hay cắt bớt đuôi
+	 * hoặc chèn thêm chữ, còn phần mã thì luôn đứng đầu.
+	 */
+	public static function get_by_qr_code($qr_code)
+	{
+		global $wpdb;
+
+		$qr_code = strtoupper(trim((string) $qr_code));
+		if ($qr_code === '' || strpos($qr_code, 'QR') === false) {
+			return null;
+		}
+
+		$row = $wpdb->get_row(
+			$wpdb->prepare(
+				'SELECT * FROM ' . self::table() . " WHERE content = %s OR content LIKE %s
+				 ORDER BY (status = 'pending') DESC, id DESC LIMIT 1",
+				$qr_code,
+				$wpdb->esc_like($qr_code) . ' - %'
+			),
+			ARRAY_A
+		);
+
+		return $row ? self::hydrate($row) : null;
+	}
+
 	public static function get_by_bill_code($bill_code)
 	{
 		global $wpdb;
