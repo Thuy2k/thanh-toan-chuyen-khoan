@@ -156,20 +156,16 @@ class TTCK_API
 	}
 
 	/**
-	 * Nội dung chuyển khoản cho QR động của POS:
+	 * DEPRECATED — chuyển sang dùng build_qr_content() cho QR động mới.
 	 *
-	 *     <mã phiếu bán chính> - <tên shop>
+	 * Function này KHÔNG thực sự dùng $bill_code: nó chỉ return build_qr_content
+	 * với format mới "<mã shop>QR<5 ký tự ngẫu nhiên> - <tên shop>". Vẫn giữ ở
+	 * đây cho backward-compatible nếu đường dò cũ (legacy) đang dựa vào format cũ
+	 * "<mã phiếu bán> - <tên shop>" — nhưng chú ý: hiện tại HÀM NÀY LUÔN TRẢ VỀ
+	 * FORMAT MỚI, không phải format cũ như docblock nói.
 	 *
-	 * VD: "18008B35A89 - TGS LYTHUONGKIET2". Luôn là mã phiếu bán CHÍNH (sale
-	 * ledger đang mở), KHÔNG phải mã phiếu tách hàng khuyến mãi (bill Z) — bên
-	 * gọi (`TGS_POS_Ajax_Order::save_order()`) truyền `$sale_code` của phiếu
-	 * chính vào `bill_code`, dùng chung cho cả 3 luồng ra QR: bán một hình
-	 * thức, "Đa hình thức thanh toán" (khi có dòng quét mã), và "Hoàn hàng kết
-	 * hợp đổi trả" (QR của đơn bán mới) — cả ba đều đi qua đúng một chỗ tạo QR
-	 * này nên không cần sửa riêng từng nơi.
-	 *
-	 * Không có bill_code (hiếm, ví dụ preview chưa gắn phiếu): rơi về chỉ tên
-	 * shop, không bịa mã phiếu.
+	 * Để tạo nội dung QR mới (random token) → dùng build_qr_content().
+	 * TTCK_Payments::create() đã được sửa sang gọi build_qr_content().
 	 */
 	public static function build_transfer_content($bill_code = '', $blog_id = 0)
 	{

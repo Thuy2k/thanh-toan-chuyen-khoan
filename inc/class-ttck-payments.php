@@ -158,14 +158,15 @@ class TTCK_Payments
 		$ref_code = $prefix . $id;
 
 		/*
-		 * Nội dung chuyển khoản:
-		 *  - Có bill_code (đơn từ POS): mã QR ngẫu nhiên theo shop do
-		 *    TTCK_API::build_transfer_content() dựng — xem chú thích ở đó.
-		 *  - Không có bill_code: giữ hành vi cũ (nội dung = <tiền tố>ID) để app
-		 *    ngân hàng / Telegram tự bóc tách và xác nhận.
+		 * Nội dung chuyển khoản: dùng TTCK_API::build_qr_content() để sinh
+		 * "<mã shop>QR<5 ký tự ngẫu nhiên> - <tên shop>". Poller VietinBank
+		 * (và các đường dò khác) bóc mã này từ sao kê để đối soát.
+		 *
+		 * Không có bill_code (hiếm, ví dụ preview chưa gắn phiếu): rơi về chỉ tên
+		 * shop, không bịa mã phiếu.
 		 */
-		if ($bill_code !== '' && is_callable(array('TTCK_API', 'build_transfer_content'))) {
-			$content = TTCK_Banks::ascii(TTCK_API::build_transfer_content($bill_code));
+		if ($bill_code !== '' && is_callable(array('TTCK_API', 'build_qr_content'))) {
+			$content = TTCK_Banks::ascii(TTCK_API::build_qr_content(0));
 		} else {
 			$content = TTCK_Banks::ascii(TTCKPayment::transaction_text($ref_code, null));
 		}
