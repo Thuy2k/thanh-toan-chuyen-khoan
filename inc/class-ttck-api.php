@@ -263,11 +263,26 @@ class TTCK_API
 	 * Mã phiếu bán vẫn được lưu nguyên ở cột `bill_code`, nên báo cáo và đối
 	 * soát theo phiếu không mất gì.
 	 */
-	public static function build_qr_content($blog_id = 0)
+	public static function build_qr_content($blog_id = 0, $bill_code = '')
 	{
-		$code = self::shop_code($blog_id) . 'QR' . self::random_qr_token(5);
 		$shop = self::shop_name_slug($blog_id);
 
+		// New mandated format: "TT QR cho CT THE GIOI SUA - TGS<SHOP> - <BILL_CODE>"
+		// If a bill_code is provided, prefer the explicit readable format
+		// so that bank statements contain the invoice id for easy matching.
+		$bill_code = trim((string) $bill_code);
+		if ($bill_code !== '') {
+			// Mandated readable format requested by operations team:
+			// "TT QR cho CT THE GIOI SUA - TGS<SHOP> - <BILL_CODE>"
+			$shop_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $shop));
+			$bill_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $bill_code));
+			// Use compact format preferred: "TTQR <BILL_CODE> TGS<SHOP>".
+			// Keep it short so it survives bank truncation and is easy to parse.
+			return sprintf('TTQR %s TGS%s', $bill_part, $shop_part);
+		}
+
+		// Fallback: keep the previous random token format for backwards compat
+		$code = self::shop_code($blog_id) . 'QR' . self::random_qr_token(5);
 		return $shop !== '' ? $code . ' - ' . $shop : $code;
 	}
 
@@ -545,7 +560,20 @@ class TTCK_API
 			'account_number' => $payment['account_number'],
 			'account_name'   => $payment['account_name'],
 			'amount'         => $payment['amount'],
-			'content'        => $payment['content'],
+			// Expose bill_code and ref_code explicitly so callers (POS) can
+			// rely on them without parsing the human-readable content string.
+			'bill_code'      => isset($payment['bill_code']) ? $payment['bill_code'] : '',
+			'ref_code'       => isset($payment['ref_code']) ? $payment['ref_code'] : '',
+			// Ensure content is present for front-end display; if missing, prefer
+			// the bill_code-based readable format so POS always shows something
+			// meaningful for staff when reconciling.
+			'content'        => trim((string) $payment['content']) !== ''
+				? $payment['content']
+				: (trim((string) $payment['bill_code']) !== ''
+					? sprintf('TTQR %s TGS%s',
+						strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $payment['bill_code'])),
+						strtoupper(preg_replace('/[^A-Za-z0-9]/', '', self::shop_name_slug(0))))
+					: ''),
 			'icon'           => TTCK_Banks::icon_url($payment['bank_id']),
 		);
 

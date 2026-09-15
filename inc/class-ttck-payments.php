@@ -166,7 +166,11 @@ class TTCK_Payments
 		 * shop, không bịa mã phiếu.
 		 */
 		if ($bill_code !== '' && is_callable(array('TTCK_API', 'build_qr_content'))) {
-			$content = TTCK_Banks::ascii(TTCK_API::build_qr_content(0));
+			// Use the exact mandated readable format for bank memo when
+			// bill_code is present. Do not prefix with ref_code so the memo
+			// matches the required pattern exactly.
+			$readable = TTCK_API::build_qr_content(0, $bill_code);
+			$content = TTCK_Banks::ascii($readable);
 		} else {
 			$content = TTCK_Banks::ascii(TTCKPayment::transaction_text($ref_code, null));
 		}
