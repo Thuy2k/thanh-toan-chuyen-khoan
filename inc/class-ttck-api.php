@@ -276,9 +276,9 @@ class TTCK_API
 			// "TT QR cho CT THE GIOI SUA - TGS<SHOP> - <BILL_CODE>"
 			$shop_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $shop));
 			$bill_part = strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $bill_code));
-			// Use compact format preferred: "TTQR <BILL_CODE> TGS<SHOP>".
+			// Use compact format preferred: "TT QR <BILL_CODE> TGS<SHOP>".
 			// Keep it short so it survives bank truncation and is easy to parse.
-			return sprintf('TTQR %s TGS%s', $bill_part, $shop_part);
+			return sprintf('TT QR %s TGS%s', $bill_part, $shop_part);
 		}
 
 		// Fallback: keep the previous random token format for backwards compat
@@ -570,7 +570,7 @@ class TTCK_API
 			'content'        => trim((string) $payment['content']) !== ''
 				? $payment['content']
 				: (trim((string) $payment['bill_code']) !== ''
-					? sprintf('TTQR %s TGS%s',
+					? sprintf('TT QR %s TGS%s',
 						strtoupper(preg_replace('/[^A-Za-z0-9]/', '', $payment['bill_code'])),
 						strtoupper(preg_replace('/[^A-Za-z0-9]/', '', self::shop_name_slug(0))))
 					: ''),
